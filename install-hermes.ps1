@@ -179,7 +179,8 @@ function Set-HermesSessionEnv {
   $env:UV_PYTHON_INSTALL_DIR = "$Root\uv-python"
   $env:UV_PYTHON_CACHE_DIR = "$Root\cache\uv\python"
   $env:UV_PYTHON_PREFERENCE = "only-managed"
-  $env:UV_MANAGED_PYTHON = "1"
+  # Newer uv rejects UV_MANAGED_PYTHON when UV_PYTHON_PREFERENCE is set.
+  Remove-Item Env:UV_MANAGED_PYTHON -ErrorAction SilentlyContinue
   $env:UV_PYTHON_NO_REGISTRY = "1"
   $env:UV_CACHE_DIR = "$Root\cache\uv"
   $env:UV_DEFAULT_INDEX = $PypiIndex
@@ -322,20 +323,7 @@ function Install-HermesPython {
   }
 
   Info "Installing portable Python 3.11 under $Root\uv-python"
-  # 临时清除与uv冲突的环境变量
-  $oldPreference = $env:UV_PYTHON_PREFERENCE
-  $oldManaged = $env:UV_MANAGED_PYTHON
-  $oldNoRegistry = $env:UV_PYTHON_NO_REGISTRY
-  try {
-    Remove-Item Env:UV_PYTHON_PREFERENCE -ErrorAction SilentlyContinue
-    Remove-Item Env:UV_MANAGED_PYTHON -ErrorAction SilentlyContinue
-    Remove-Item Env:UV_PYTHON_NO_REGISTRY -ErrorAction SilentlyContinue
-    & $uv python install 3.11 --install-dir "$Root\uv-python"
-  } finally {
-    if ($oldPreference) { $env:UV_PYTHON_PREFERENCE = $oldPreference }
-    if ($oldManaged) { $env:UV_MANAGED_PYTHON = $oldManaged }
-    if ($oldNoRegistry) { $env:UV_PYTHON_NO_REGISTRY = $oldNoRegistry }
-  }
+  & $uv python install 3.11 --install-dir "$Root\uv-python"
   if ($LASTEXITCODE -ne 0) { throw "uv python install 3.11 failed" }
 
   $py = Get-PortableHermesPython
@@ -425,7 +413,6 @@ set "PLAYWRIGHT_BROWSERS_PATH=%HERMES_ROOT%\ms-playwright"
 set "UV_PYTHON_INSTALL_DIR=%HERMES_ROOT%\uv-python"
 set "UV_PYTHON_CACHE_DIR=%HERMES_ROOT%\cache\uv\python"
 set "UV_PYTHON_PREFERENCE=only-managed"
-set "UV_MANAGED_PYTHON=1"
 set "UV_PYTHON_NO_REGISTRY=1"
 set "UV_CACHE_DIR=%HERMES_ROOT%\cache\uv"
 set "UV_DEFAULT_INDEX=$PypiIndex"
@@ -711,7 +698,7 @@ Add-UserPathEntries @(
 [Environment]::SetEnvironmentVariable("UV_PYTHON_INSTALL_DIR", "$Root\uv-python", "User")
 [Environment]::SetEnvironmentVariable("UV_PYTHON_CACHE_DIR", "$Root\cache\uv\python", "User")
 [Environment]::SetEnvironmentVariable("UV_PYTHON_PREFERENCE", "only-managed", "User")
-[Environment]::SetEnvironmentVariable("UV_MANAGED_PYTHON", "1", "User")
+[Environment]::SetEnvironmentVariable("UV_MANAGED_PYTHON", $null, "User")
 [Environment]::SetEnvironmentVariable("UV_PYTHON_NO_REGISTRY", "1", "User")
 [Environment]::SetEnvironmentVariable("UV_PYTHON_INSTALL_MIRROR", (Use-GithubProxy "https://github.com/astral-sh/python-build-standalone/releases/download"), "User")
 
