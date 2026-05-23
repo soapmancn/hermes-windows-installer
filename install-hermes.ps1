@@ -623,6 +623,7 @@ cmd /c "`"$Root\hermes-stop.bat`" --quiet" | Out-Null
 Set-Content -Path "$Root\install-root.txt" -Value $Root -Encoding ASCII
 
 if (Test-Path $ZipPath) { Remove-Item -Force $ZipPath }
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::Open($ZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
 try {
