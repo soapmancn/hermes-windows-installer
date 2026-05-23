@@ -615,10 +615,13 @@ if ($Restart) {
 @'
 param(
   [string]$Root = (Split-Path -Parent $PSCommandPath),
-  [string]$ZipPath = "C:\hermes.zip"
+  [string]$ZipPath = (Join-Path ([Environment]::GetFolderPath("Desktop")) "hermes.zip")
 )
 $ErrorActionPreference = "Stop"
 $Root = [IO.Path]::GetFullPath($Root).TrimEnd("\")
+$ZipPath = [IO.Path]::GetFullPath($ZipPath)
+$ZipDir = Split-Path -Parent $ZipPath
+if ($ZipDir -and -not (Test-Path $ZipDir)) { New-Item -ItemType Directory -Force -Path $ZipDir | Out-Null }
 cmd /c "`"$Root\hermes-stop.bat`" --quiet" | Out-Null
 Set-Content -Path "$Root\install-root.txt" -Value $Root -Encoding ASCII
 
@@ -773,5 +776,6 @@ Write-Host "Done." -ForegroundColor Green
 Write-Host "1) Configure: $Root\hermes.cmd setup"
 Write-Host "2) Run      : $Root\hermes-run.bat"
 Write-Host "3) Stop     : $Root\hermes-stop.bat"
-Write-Host "4) Package  : powershell -ExecutionPolicy Bypass -File $Root\hermes-pack.ps1 -ZipPath C:\hermes.zip"
+$DefaultZipPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "hermes.zip"
+Write-Host "4) Package  : powershell -ExecutionPolicy Bypass -File $Root\hermes-pack.ps1 -ZipPath `"$DefaultZipPath`""
 Write-Host "5) Upgrade  : $Root\hermes-upgrade.bat -Restart"

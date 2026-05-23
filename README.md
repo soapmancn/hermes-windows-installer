@@ -150,10 +150,16 @@ C:\hermes\hermes-upgrade.bat -Backup -Restart
 
 ## 打包
 
-把 `C:\hermes` 打包成 `C:\hermes.zip`：
+把 `C:\hermes` 打包成当前用户桌面的 `hermes.zip`：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File C:\hermes\hermes-pack.ps1 -ZipPath C:\hermes.zip
+powershell -ExecutionPolicy Bypass -File C:\hermes\hermes-pack.ps1
+```
+
+如果要指定其他输出位置，选择当前用户有写入权限的目录：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\hermes\hermes-pack.ps1 -ZipPath "$env:USERPROFILE\Desktop\hermes.zip"
 ```
 
 注意：压缩包可能包含 `.env`、token、API Key、登录态等敏感信息，不要发给不可信的人。
@@ -164,7 +170,7 @@ powershell -ExecutionPolicy Bypass -File C:\hermes\hermes-pack.ps1 -ZipPath C:\h
 
 ```powershell
 New-Item -ItemType Directory -Force D:\hermes | Out-Null
-Expand-Archive -Path .\hermes.zip -DestinationPath D:\hermes -Force
+Expand-Archive -Path "$env:USERPROFILE\Desktop\hermes.zip" -DestinationPath D:\hermes -Force
 powershell -ExecutionPolicy Bypass -File D:\hermes\hermes-relocate.ps1 -Root D:\hermes -OldRoot C:\hermes
 D:\hermes\hermes-run.bat
 ```
