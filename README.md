@@ -12,7 +12,7 @@ C:\hermes
 
 - Node.js 24 portable
 - uv portable
-- Python 3.11 portable，位于 `C:\hermes\uv-python`
+- Python 3.11 portable，位于 `C:\hermes\uv-python`，不写入用户目录的 `python3.11.exe`
 - Portable Git
 - ripgrep
 - ffmpeg
@@ -22,7 +22,15 @@ C:\hermes
 
 ## 快速安装
 
-把 `install-hermes.ps1` 下载到当前用户桌面，然后运行：
+在 PowerShell 里运行下面几行，把最新版 `install-hermes.ps1` 下载到当前用户桌面并启动安装：
+
+```powershell
+$dst = "$([Environment]::GetFolderPath('Desktop'))\install-hermes.ps1"
+iwr -UseBasicParsing -Uri "https://ghfast.top/https://raw.githubusercontent.com/soapmancn/hermes-windows-installer/main/install-hermes.ps1" -OutFile $dst
+powershell -NoProfile -ExecutionPolicy Bypass -File $dst
+```
+
+如果脚本已经在桌面，也可以直接运行：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$([Environment]::GetFolderPath('Desktop'))\install-hermes.ps1"
@@ -50,6 +58,8 @@ npm:     https://registry.npmmirror.com
 PyPI:    https://pypi.tuna.tsinghua.edu.cn/simple
 GitHub:  https://ghfast.top/
 ```
+
+默认 GitHub 代理不仅用于下载依赖，也会 patch 官方 Hermes Agent 安装器里的 `git clone` 和 ZIP archive 地址，避免官方脚本内部再次直连 GitHub。
 
 可以按需替换：
 
@@ -166,9 +176,11 @@ D:\hermes\hermes-run.bat
 安装时应该看到类似：
 
 ```text
-Using CPython 3.11.x interpreter at: C:\hermes\uv-python\...
-Creating virtual environment at: venv
+Installed Python 3.11.x
+Portable Python ready: C:\hermes\uv-python\cpython-3.11.x-windows-x86_64-none\python.exe
 ```
+
+脚本使用 `uv python install --no-bin`，所以不会尝试覆盖 `%USERPROFILE%\.local\bin\python3.11.exe`。如果你看到 `Executable already exists ... python3.11.exe`，说明运行的是旧脚本，按“快速安装”的命令重新下载最新版后再运行。
 
 安装后也可以检查：
 
@@ -184,11 +196,13 @@ C:\hermes\uv-python\...
 
 ## 常见问题
 
-如果下载失败，可以换 GitHub 代理：
+如果下载失败，可以换 GitHub 代理并重新运行：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$([Environment]::GetFolderPath('Desktop'))\install-hermes.ps1" -GithubProxy "https://gh.llkk.cc/"
 ```
+
+如果日志里出现 `Host key verification failed`，这是官方安装器先尝试 SSH clone 导致的，通常可以忽略；最新版脚本会把后续 HTTPS clone 和 ZIP 下载改走 `-GithubProxy`。
 
 如果安装中断，可以重新运行安装命令。脚本会复用已下载和已安装的组件，并重建 Hermes venv。
 
