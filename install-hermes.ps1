@@ -323,7 +323,7 @@ function Install-HermesPython {
   }
 
   Info "Installing portable Python 3.11 under $Root\uv-python"
-  & $uv python install 3.11 --install-dir "$Root\uv-python"
+  & $uv python install 3.11 --install-dir "$Root\uv-python" --no-bin
   if ($LASTEXITCODE -ne 0) { throw "uv python install 3.11 failed" }
 
   $py = Get-PortableHermesPython
