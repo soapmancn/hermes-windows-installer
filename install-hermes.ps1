@@ -615,7 +615,9 @@ if ($Restart) {
 @'
 param(
   [string]$Root = (Split-Path -Parent $PSCommandPath),
-  [string]$ZipPath = (Join-Path ([Environment]::GetFolderPath("Desktop")) "hermes.zip")
+  [string]$ZipPath = (Join-Path ([Environment]::GetFolderPath("Desktop")) "hermes.zip"),
+  [ValidateSet("Fastest", "Optimal", "NoCompression")]
+  [string]$CompressionLevel = "Fastest"
 )
 $ErrorActionPreference = "Stop"
 $Root = [IO.Path]::GetFullPath($Root).TrimEnd("\")
@@ -628,6 +630,7 @@ Set-Content -Path "$Root\install-root.txt" -Value $Root -Encoding ASCII
 if (Test-Path $ZipPath) { Remove-Item -Force $ZipPath }
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+$level = [System.Enum]::Parse([System.IO.Compression.CompressionLevel], $CompressionLevel)
 $zip = [System.IO.Compression.ZipFile]::Open($ZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
 try {
   Get-ChildItem -LiteralPath $Root -Recurse -Force -File | ForEach-Object {
@@ -635,7 +638,7 @@ try {
     if ($full -like "$Root\tmp\*" -or $full -like "$Root\cache\npm\*" -or $full -like "$Root\cache\uv\*" -or $full -like "$Root\logs\*") { return }
     if (([IO.Path]::GetFullPath($ZipPath)) -eq $full) { return }
     $rel = $full.Substring($Root.Length).TrimStart("\") -replace "\\","/"
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $full, $rel, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $full, $rel, $level) | Out-Null
   }
 }
 finally { $zip.Dispose() }

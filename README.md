@@ -162,6 +162,12 @@ powershell -ExecutionPolicy Bypass -File C:\hermes\hermes-pack.ps1
 powershell -ExecutionPolicy Bypass -File C:\hermes\hermes-pack.ps1 -ZipPath "$env:USERPROFILE\Desktop\hermes.zip"
 ```
 
+打包默认使用 `Fastest` 压缩级别。`C:\hermes` 包含 Python、Node、Portable Git、venv、node_modules 等大量文件，打包会比较慢；如果更在意速度而不是压缩包大小，可以改用不压缩：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\hermes\hermes-pack.ps1 -CompressionLevel NoCompression
+```
+
 注意：压缩包可能包含 `.env`、token、API Key、登录态等敏感信息，不要发给不可信的人。
 
 ## 迁移到其他盘符
