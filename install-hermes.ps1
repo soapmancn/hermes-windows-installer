@@ -322,7 +322,20 @@ function Install-HermesPython {
   }
 
   Info "Installing portable Python 3.11 under $Root\uv-python"
-  & $uv python install 3.11 --install-dir "$Root\uv-python"
+  # 临时清除与uv冲突的环境变量
+  $oldPreference = $env:UV_PYTHON_PREFERENCE
+  $oldManaged = $env:UV_MANAGED_PYTHON
+  $oldNoRegistry = $env:UV_PYTHON_NO_REGISTRY
+  try {
+    Remove-Item Env:UV_PYTHON_PREFERENCE -ErrorAction SilentlyContinue
+    Remove-Item Env:UV_MANAGED_PYTHON -ErrorAction SilentlyContinue
+    Remove-Item Env:UV_PYTHON_NO_REGISTRY -ErrorAction SilentlyContinue
+    & $uv python install 3.11 --install-dir "$Root\uv-python"
+  } finally {
+    if ($oldPreference) { $env:UV_PYTHON_PREFERENCE = $oldPreference }
+    if ($oldManaged) { $env:UV_MANAGED_PYTHON = $oldManaged }
+    if ($oldNoRegistry) { $env:UV_PYTHON_NO_REGISTRY = $oldNoRegistry }
+  }
   if ($LASTEXITCODE -ne 0) { throw "uv python install 3.11 failed" }
 
   $py = Get-PortableHermesPython
