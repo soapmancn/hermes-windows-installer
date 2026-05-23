@@ -341,12 +341,40 @@ function Patch-HermesAgentInstaller([string]$InstallerPath) {
   $old = '& $UvCmd venv venv --python $PythonVersion'
   $new = 'if ($env:HERMES_PORTABLE_PYTHON_EXE -and (Test-Path $env:HERMES_PORTABLE_PYTHON_EXE)) { & $UvCmd venv venv --python $env:HERMES_PORTABLE_PYTHON_EXE } else { & $UvCmd venv venv --python $PythonVersion }'
   $content = Get-Content -LiteralPath $InstallerPath -Raw
+  $changed = $false
+
   if ($content.Contains($old)) {
     $content = $content.Replace($old, $new)
-    Set-Content -LiteralPath $InstallerPath -Value $content -Encoding UTF8
+    $changed = $true
     Info "Patched Hermes installer to use portable Python: $($py.FullName)"
   } else {
     Warn "Could not patch Hermes installer venv command; it may still use uv's default Python discovery."
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($GithubProxy)) {
+    $directRepoBase = "https://github.com/NousResearch/hermes-agent"
+    $proxiedRepoBase = Use-GithubProxy $directRepoBase
+    $sshRepoUrl = "git@github.com:NousResearch/hermes-agent.git"
+    $proxiedRepoUrl = Use-GithubProxy "$directRepoBase.git"
+    $urlChanged = $false
+
+    if ($content.Contains($directRepoBase)) {
+      $content = $content.Replace($directRepoBase, $proxiedRepoBase)
+      $changed = $true
+      $urlChanged = $true
+    }
+    if ($content.Contains($sshRepoUrl)) {
+      $content = $content.Replace($sshRepoUrl, $proxiedRepoUrl)
+      $changed = $true
+      $urlChanged = $true
+    }
+    if ($urlChanged) {
+      Info "Patched Hermes installer GitHub URLs to use proxy: $($GithubProxy.TrimEnd('/'))"
+    }
+  }
+
+  if ($changed) {
+    Set-Content -LiteralPath $InstallerPath -Value $content -Encoding UTF8
   }
 }
 
