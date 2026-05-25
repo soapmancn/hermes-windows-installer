@@ -20,8 +20,8 @@ param(
     [switch]$WithSystemPackages,
     [switch]$WithOptionalExtras,
     [string]$Branch = "main",
-    [string]$HermesHome = "D:\hermes",
-    [string]$InstallDir = "D:\hermes\hermes-agent"
+    [string]$HermesHome = "E:\hermes",
+    [string]$InstallDir = "E:\hermes\hermes-agent"
 )
 
 $ErrorActionPreference = "Stop"
