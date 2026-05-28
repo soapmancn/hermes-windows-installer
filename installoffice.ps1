@@ -412,13 +412,20 @@ function Test-Python {
         # semantics or stderr noise.  This fix was previously landed as
         # commit ec1714e71 and then lost in a release squash; reapplied here.
         $ErrorActionPreference = "Continue"
-        $uvOutput = & $UvCmd python install $PythonVersion 2>&1
+        # Pin Python to InstallDir so it stays portable (not in uv's default ~/.local)
+        $uvPythonPath = Join-Path $InstallDir "uv-python"
+        & $UvCmd python install $PythonVersion --path $uvPythonPath 2>&1
         $uvExitCode = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
 
         # Check if Python is now available (more reliable than exit code
         # since uv may return non-zero due to "already installed" etc.)
         $pythonPath = & $UvCmd python find $PythonVersion 2>$null
+        if (-not $pythonPath) {
+            # Python was installed to custom path -- look it up directly
+            $pythonPath = & $UvCmd python list --python $PythonVersion --only-installed 2>$null | Select-Object -First 1
+            if ($pythonPath) { $pythonPath = $pythonPath.Trim() }
+        }
         if ($pythonPath) {
             $ver = & $pythonPath --version 2>$null
             Write-Success "Python installed: $ver"
@@ -608,28 +615,8 @@ function Install-Git {
         }
 
         # Add to session PATH so the rest of this install run can use git.
+        # In portable mode we do NOT write to User PATH -- everything stays under $InstallDir.
         $env:Path = "$gitDir\cmd;$env:Path"
-
-        # Persist to User PATH so fresh shells see it.  PortableGit needs
-        # cmd\ (for git.exe), bin\ (for bash.exe + core tools), and
-        # usr\bin\ (for perl, ssh, curl, and other POSIX coreutils).
-        $newPathEntries = @(
-            "$gitDir\cmd",
-            "$gitDir\bin",
-            "$gitDir\usr\bin"
-        )
-        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        $userPathItems = if ($userPath) { $userPath -split ";" } else { @() }
-        $changed = $false
-        foreach ($entry in $newPathEntries) {
-            if ($userPathItems -notcontains $entry) {
-                $userPathItems += $entry
-                $changed = $true
-            }
-        }
-        if ($changed) {
-            [Environment]::SetEnvironmentVariable("Path", ($userPathItems -join ";"), "User")
-        }
 
         $version = & $gitExe --version
         Write-Success "Git $version installed to $gitDir (portable, user-scoped)"
@@ -1026,8 +1013,6 @@ function Install-Repository {
         $cloneSuccess = $false
 
         # Fix Windows git "copy-fd: write returned: Invalid argument" error.
-        # Refresh PATH from registry so git is findable even after directory wipe.
-        Sync-EnvPath
         Write-Info "Configuring git for Windows compatibility..."
         $env:GIT_CONFIG_COUNT = "1"
         $env:GIT_CONFIG_KEY_0 = "windows.appendAtomically"
@@ -1044,9 +1029,16 @@ function Install-Repository {
         $env:GIT_SSH_COMMAND = $null
 
         if (-not $cloneSuccess) {
+            # Save portable git session PATH before wipe (absolute paths)
+            $savedGitBin = $null
+            if (Test-Path "$InstallDir\git\cmd\git.exe") {
+                $savedGitBin = "$InstallDir\git\cmd;$InstallDir\git\bin;$InstallDir\git\usr\bin"
+            }
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
             Write-Info "SSH failed, trying HTTPS..."
             try {
+                # Re-add portable git to session PATH after directory wipe
+                if ($savedGitBin) { $env:Path = "$savedGitBin;$env:Path" }
                 git -c windows.appendAtomically=false clone --branch $Branch --recurse-submodules $RepoUrlHttps $InstallDir
                 if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true }
             } catch { }
