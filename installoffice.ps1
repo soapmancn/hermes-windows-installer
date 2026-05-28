@@ -54,7 +54,7 @@ $InstallDir = $InstallDir.TrimEnd('\')
 
 # HermesHome is now a subdirectory of InstallDir (portable)
 $HermesHome = Join-Path $InstallDir ".hermes"
-$PythonVersion = "3.13"
+$PythonVersion = "3.12"
 $NodeVersion = "24"
 
 # Stage-protocol version.
