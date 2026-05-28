@@ -1,14 +1,14 @@
 # ============================================================================
-# Hermes Agent Installer for Windows
+# Hermes Agent Installer for Windows (China-Optimized, Portable)
 # ============================================================================
 # Installation script for Windows (PowerShell).
 # Uses uv for fast Python provisioning and package management.
 #
-# Usage:
-#   iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)
+# All dependencies and code are installed to a user-specified directory.
+# Downloads are optimized for China mainland users via mirrors.
 #
-# Or download and run with options:
-#   .\install.ps1 -NoVenv -SkipSetup
+# Usage:
+#   .\installoffice.ps1 -InstallDir "D:\hermes-agent"
 #
 # ============================================================================
 
@@ -23,8 +23,8 @@ param(
     # exact ref.  Precedence: Commit > Tag > Branch.
     [string]$Commit = "",
     [string]$Tag = "",
-    [string]$HermesHome = "$env:LOCALAPPDATA\hermes",
-    [string]$InstallDir = "$env:LOCALAPPDATA\hermes\hermes-agent",
+    # HermesHome is now UNDER InstallDir (portable, no system dependency)
+    [string]$InstallDir,
 
     # --- Stage protocol (additive; default invocation behaves as before) ----
     # See the "Stage protocol" section near the bottom of the file for the
@@ -42,52 +42,75 @@ param(
     [switch]$PostInstall
 )
 
-$ErrorActionPreference = "Stop"
-
-# Suppress Invoke-WebRequest's per-chunk progress bar.  Windows PowerShell
-# 5.1's progress UI repaints synchronously on every received byte, which
-# pegs CPU on a single core and throttles downloads by 10-100x (a 57MB
-# PortableGit grab can take 5 minutes with progress on vs 20 seconds
-# with progress off, on the same network).  Every IWR call in this
-# script is fire-and-forget so we never need to see the bar.  Restored
-# automatically when the script exits.
-$ProgressPreference = "SilentlyContinue"
-
-# Force the console to UTF-8 so non-ASCII output from native commands
-# (e.g. playwright's box-drawing progress bars and download banners,
-# git's bullet glyphs, npm's check marks) renders correctly instead of
-# as IBM437/Windows-1252 mojibake (sequences like 0xE2 0x95 0x94 box-
-# drawing chars decoded under the legacy DOS codepage).  This is a
-# DISPLAY-only fix; the underlying bytes are already correct.  We do
-# NOT change the file's own encoding (it remains pure ASCII for PS 5.1
-# parser compatibility; see comments at the top of the entry-point
-# dispatch).  This affects only what the user sees in their terminal
-# during this install run, and reverts automatically when the script
-# exits and the host's console encoding is restored.
-try {
-    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-} catch {
-    # Some constrained PowerShell hosts disallow encoding mutation.
-    # Mojibake on output is then cosmetic-only, install still works.
+# Require InstallDir to be specified -- everything goes under it
+if (-not $InstallDir) {
+    Write-Err "Please specify -InstallDir, e.g. -InstallDir ""D:\hermes-agent"""
+    Write-Info "All code, dependencies and data will be installed under this directory."
+    exit 1
 }
 
+# Normalize path: remove trailing backslash if present
+$InstallDir = $InstallDir.TrimEnd('\')
+
+# HermesHome is now a subdirectory of InstallDir (portable)
+$HermesHome = Join-Path $InstallDir ".hermes"
+$PythonVersion = "3.13"
+$NodeVersion = "24"
+
+# Stage-protocol version.
+$InstallStageProtocolVersion = 1
+
 # ============================================================================
-# Configuration
+# China-Mainland Download Mirrors
 # ============================================================================
+# Primary URLs are GitHub. Fallback mirrors are for China users.
+# GIT_MIRROR: git clone URL prefix (empty = use primary)
+# PYTHON_MIRROR: uv python install mirror URL (empty = use primary)
+# NODE_MIRROR_BASE: Node.js download base URL (empty = use primary)
+$GIT_MIRROR_PREFIX = ""       # e.g. "https://gh.proxy.cn/d/https://github.com" or "https://mirror.githack.com/NousResearch"
+$GIT_PROXY = ""              # e.g. "http://127.0.0.1:7890" (set if you use a proxy)
+$PYTHON_MIRROR = ""          # e.g. "https://registry.npmmirror.com" or "https://py.sjtu.edu.cn"
+$NODE_MIRROR_BASE = ""       # e.g. "https://npmmirror.com/mirrors/node" or "https://registry.npmmirror.com/-/binary/node"
+
+function Get-GitCloneUrl {
+    param([string]$baseUrl)
+    if ($GIT_PROXY) {
+        return "$GIT_PROXY/$baseUrl"
+    }
+    if ($GIT_MIRROR_PREFIX) {
+        return "$GIT_MIRROR_PREFIX/$baseUrl"
+    }
+    return $baseUrl
+}
+
+function Get-GitLabMirrorCloneUrl {
+    # GitLab CN users can set this to their private mirror of the repo
+    param([string]$baseUrl)
+    if ($GIT_MIRROR_PREFIX) {
+        return "$GIT_MIRROR_PREFIX/$baseUrl"
+    }
+    return $baseUrl
+}
 
 $RepoUrlSsh = "git@github.com:NousResearch/hermes-agent.git"
 $RepoUrlHttps = "https://github.com/NousResearch/hermes-agent.git"
-$PythonVersion = "3.11"
-$NodeVersion = "22"
-
-# Stage-protocol version.  Bumped only for genuinely breaking changes to the
-# manifest schema, stage-name set semantics, or stdout JSON shape.  Adding a
-# new stage does NOT bump this -- drivers iterate the manifest dynamically.
-$InstallStageProtocolVersion = 1
+$RepoUrlHttpsProxy = Get-GitCloneUrl -baseUrl $RepoUrlHttps
 
 # ============================================================================
 # Helper functions
 # ============================================================================
+
+$ErrorActionPreference = "Stop"
+
+# Suppress Invoke-WebRequest progress bar
+$ProgressPreference = "SilentlyContinue"
+
+# Force UTF-8 console output
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+} catch {
+    # Some constrained PowerShell hosts disallow encoding mutation.
+}
 
 function Write-Banner {
     Write-Host ""
@@ -95,6 +118,7 @@ function Write-Banner {
     Write-Host "|             * Hermes Agent Installer                    |" -ForegroundColor Magenta
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
     Write-Host "|  An open source AI agent by Nous Research.              |" -ForegroundColor Magenta
+    Write-Host "|  Portable mode: all data under $InstallDir              |" -ForegroundColor Magenta
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
     Write-Host ""
 }
@@ -172,7 +196,7 @@ function Install-AgentBrowser {
     }
 
     Write-Info "Installing agent-browser via npm -g --prefix..."
-    $prefixDir = Join-Path $HermesHome "node"
+    $prefixDir = Join-Path $InstallDir "node"
     if (-not (Test-Path $prefixDir)) {
         New-Item -ItemType Directory -Path $prefixDir -Force | Out-Null
     }
@@ -233,6 +257,15 @@ function Install-Uv {
         return $true
     }
     
+    # Check under InstallDir first (portable install)
+    $uvUnderInstallDir = Join-Path $InstallDir "uv\uv.exe"
+    if (Test-Path $uvUnderInstallDir) {
+        $script:UvCmd = $uvUnderInstallDir
+        $version = & $uvUnderInstallDir --version
+        Write-Success "uv found under InstallDir ($version)"
+        return $true
+    }
+    
     # Check common install locations
     $uvPaths = @(
         "$env:USERPROFILE\.local\bin\uv.exe",
@@ -247,57 +280,40 @@ function Install-Uv {
         }
     }
     
-    # Install uv
-    Write-Info "Installing uv (fast Python package manager)..."
-    # Capture EAP outside the try block so the catch's restore call always
-    # has a meaningful value -- if the assignment lived inside try and the
-    # try body threw before reaching it, the catch would see $prevEAP
-    # unset and leave EAP at whatever the previous protected call set.
+    # Install uv to InstallDir (portable)
+    Write-Info "Installing uv to $InstallDir\uv (portable)..."
+    $uvDir = Join-Path $InstallDir "uv"
+    if (-not (Test-Path $uvDir)) {
+        New-Item -ItemType Directory -Path $uvDir -Force | Out-Null
+    }
+    
     $prevEAP = $ErrorActionPreference
     try {
-        # Relax ErrorActionPreference around the nested astral installer.
-        # The astral installer (a separate `powershell -c "irm ... | iex"`)
-        # writes download progress to stderr.  With $ErrorActionPreference
-        # = "Stop" set at the top of this script, PowerShell wraps stderr
-        # lines from native commands (which `powershell -c` is, from our
-        # perspective) as ErrorRecord objects when captured via 2>&1, then
-        # throws a terminating exception on the first one -- even though
-        # uv installs successfully and the child exits 0.  Same fix
-        # pattern Test-Python uses for `uv python install`; verify success
-        # via Test-Path on the expected binary afterwards, which is more
-        # reliable than exit-code/stderr signal anyway.
         $ErrorActionPreference = "Continue"
-        powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" 2>&1 | Out-Null
+        
+        # Download uv standalone binary directly (no shell script installer)
+        # This avoids the nested powershell -c "irm | iex" pattern
+        $uvExeUrl = "https://astral.sh/uv/latest/windows/uv.exe"
+        $uvExeDest = Join-Path $uvDir "uv.exe"
+        
+        Write-Info "Downloading uv from $uvExeUrl ..."
+        Invoke-WebRequest -Uri $uvExeUrl -OutFile $uvExeDest -UseBasicParsing
+        
         $ErrorActionPreference = $prevEAP
 
-        # Find the installed binary
-        $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
-        if (-not (Test-Path $uvExe)) {
-            $uvExe = "$env:USERPROFILE\.cargo\bin\uv.exe"
-        }
-        if (-not (Test-Path $uvExe)) {
-            # Refresh PATH and try again
-            $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-            if (Get-Command uv -ErrorAction SilentlyContinue) {
-                $uvExe = (Get-Command uv).Source
-            }
-        }
-        
-        if (Test-Path $uvExe) {
-            $script:UvCmd = $uvExe
-            $version = & $uvExe --version
-            Write-Success "uv installed ($version)"
+        if (Test-Path $uvExeDest) {
+            $script:UvCmd = $uvExeDest
+            $version = & $uvExeDest --version
+            Write-Success "uv installed ($version) to $uvDir"
             return $true
         }
         
-        Write-Err "uv installed but not found on PATH"
-        Write-Info "Try restarting your terminal and re-running"
+        Write-Err "uv download failed"
         return $false
     } catch {
-        # Restore EAP in case the try block threw before the assignment
         if ($prevEAP) { $ErrorActionPreference = $prevEAP }
         Write-Err "Failed to install uv: $_"
-        Write-Info "Install manually: https://docs.astral.sh/uv/getting-started/installation/"
+        Write-Info "Download manually: https://astral.sh/uv/"
         return $false
     }
 }
@@ -518,10 +534,10 @@ function Install-Git {
         return $true
     }
 
-    # Download PortableGit into $HermesHome\git.  Always works as long as
+    # Download PortableGit into $InstallDir\git (portable).  Always works as long as
     # we can reach github.com -- no admin, no winget, no reliance on the
     # user's possibly-broken system Git install.
-    Write-Info "Git not found -- downloading PortableGit to $HermesHome\git\ ..."
+    Write-Info "Git not found -- downloading PortableGit to $InstallDir\git\ ..."
     Write-Info "(no admin rights required; isolated from any system Git install)"
 
     try {
@@ -538,13 +554,7 @@ function Install-Git {
             "32-bit-mingit"
         }
 
-        # Pinned git-for-windows release. We deliberately do NOT hit
-        # api.github.com/repos/.../releases/latest here: that endpoint
-        # is rate-limited to 60 requests/hour/IP for unauthenticated
-        # callers, and users behind CGNAT / corporate NAT / dorm WiFi
-        # routinely hit the limit, breaking the installer.
-        # Static github.com/.../releases/download/<tag>/<asset> URLs
-        # are not subject to the API rate limit.
+        # Pinned git-for-windows release. Static URLs are not subject to GitHub API rate limit.
         $gitTag    = "v2.54.0.windows.1"
         $gitVer    = "2.54.0"
         $gitVerTag = "$gitVer.windows.1"
@@ -562,9 +572,8 @@ function Install-Git {
         }
 
         $downloadUrl = "https://github.com/git-for-windows/git/releases/download/$gitTag/$assetName"
-        $downloadExt = if ($downloadIsZip) { "zip" } else { "7z.exe" }
         $tmpFile = "$env:TEMP\$assetName"
-        $gitDir = "$HermesHome\git"
+        $gitDir = Join-Path $InstallDir "git"
 
         Write-Info "Downloading $assetName (Git for Windows $gitVerTag)..."
         Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpFile -UseBasicParsing
@@ -651,10 +660,10 @@ function Set-GitBashEnvVar {
     # this with a system-Git-only installation anyway.
     #
     # Layouts:
-    #   PortableGit (our default): $HermesHome\git\bin\bash.exe
-    #   MinGit (32-bit fallback):  $HermesHome\git\usr\bin\bash.exe
-    $candidates += "$HermesHome\git\bin\bash.exe"       # PortableGit layout (primary)
-    $candidates += "$HermesHome\git\usr\bin\bash.exe"   # MinGit / PortableGit usr\bin fallback
+    #   PortableGit (our default): $InstallDir\git\bin\bash.exe
+    #   MinGit (32-bit fallback):  $InstallDir\git\usr\bin\bash.exe
+    $candidates += (Join-Path $InstallDir "git\bin\bash.exe")      # PortableGit layout (primary)
+    $candidates += (Join-Path $InstallDir "git\usr\bin\bash.exe")  # MinGit / PortableGit usr\bin fallback
 
     # git.exe on PATH can tell us where the install root is
     $gitCmd = Get-Command git -ErrorAction SilentlyContinue
@@ -677,9 +686,13 @@ function Set-GitBashEnvVar {
 
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path $candidate)) {
-            [Environment]::SetEnvironmentVariable("HERMES_GIT_BASH_PATH", $candidate, "User")
+            # Store in a local env file so portable Hermes can find bash.exe
+            # without modifying system/User environment scope.
+            $localEnvFile = Join-Path $InstallDir ".hermes-bash-path"
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($localEnvFile, $candidate, $utf8NoBom)
             $env:HERMES_GIT_BASH_PATH = $candidate
-            Write-Info "Set HERMES_GIT_BASH_PATH=$candidate"
+            Write-Info "Set HERMES_GIT_BASH_PATH=$candidate (local, portable)"
             return
         }
     }
@@ -699,10 +712,10 @@ function Test-Node {
     }
 
     # Check our own managed install from a previous run
-    $managedNode = "$HermesHome\node\node.exe"
+    $managedNode = (Join-Path $InstallDir "node\node.exe")
     if (Test-Path $managedNode) {
         $version = & $managedNode --version
-        $env:Path = "$HermesHome\node;$env:Path"
+        $env:Path = (Join-Path $InstallDir "node") + ";$env:Path"
         Write-Success "Node.js $version found (Hermes-managed)"
         $script:HasNode = $true
         return $true
@@ -714,15 +727,20 @@ function Test-Node {
     # winget install OpenJS.NodeJS.LTS triggers a system-wide MSI install
     # which prompts UAC (the dialog often appears minimized in the taskbar
     # and the install silently waits for consent, looking like a hang).
-    # The portable zip path drops node.exe + npm into $HermesHome\node\
-    # which is user-scoped and identical to how Install-Git handles
-    # PortableGit.  Same UX guarantee: works on locked-down enterprise
-    # machines with no admin rights.
-    Write-Info "Downloading portable Node.js $NodeVersion to $HermesHome\node\ ..."
+    # The portable zip path drops node.exe + npm into $InstallDir\node\
+    # which is portable and isolated.  Same UX guarantee: works on locked-down
+    # enterprise machines with no admin rights.
+    $nodeDir = Join-Path $InstallDir "node"
+    Write-Info "Downloading portable Node.js $NodeVersion to $nodeDir\ ..."
     Write-Info "(no admin rights required; isolated from any system Node install)"
     try {
         $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
-        $indexUrl = "https://nodejs.org/dist/latest-v${NodeVersion}.x/"
+        # Use npmmirror.com for China-mainland fast download
+        if ($NODE_MIRROR_BASE) {
+            $indexUrl = "$NODE_MIRROR_BASE/v${NodeVersion}.x/"
+        } else {
+            $indexUrl = "https://nodejs.org/dist/latest-v${NodeVersion}.x/"
+        }
         $indexPage = Invoke-WebRequest -Uri $indexUrl -UseBasicParsing
         $zipName = ($indexPage.Content | Select-String -Pattern "node-v${NodeVersion}\.\d+\.\d+-win-${arch}\.zip" -AllMatches).Matches[0].Value
 
@@ -737,25 +755,14 @@ function Test-Node {
 
             $extractedDir = Get-ChildItem $tmpDir -Directory | Select-Object -First 1
             if ($extractedDir) {
-                if (Test-Path "$HermesHome\node") { Remove-Item -Recurse -Force "$HermesHome\node" }
-                Move-Item $extractedDir.FullName "$HermesHome\node"
+                if (Test-Path $nodeDir) { Remove-Item -Recurse -Force $nodeDir }
+                Move-Item $extractedDir.FullName $nodeDir
 
                 # Session PATH so the rest of this run sees node/npm.
-                $env:Path = "$HermesHome\node;$env:Path"
+                $env:Path = "$nodeDir;$env:Path"
 
-                # Persist to User PATH so fresh shells (and future stages
-                # in cross-process driver mode) see it.  Matches the
-                # pattern Install-Git uses for PortableGit.
-                $nodeDir = "$HermesHome\node"
-                $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-                $userPathItems = if ($userPath) { $userPath -split ";" } else { @() }
-                if ($userPathItems -notcontains $nodeDir) {
-                    $userPathItems += $nodeDir
-                    [Environment]::SetEnvironmentVariable("Path", ($userPathItems -join ";"), "User")
-                }
-
-                $version = & "$HermesHome\node\node.exe" --version
-                Write-Success "Node.js $version installed to $HermesHome\node\ (portable, user-scoped)"
+                $version = & "$nodeDir\node.exe" --version
+                Write-Success "Node.js $version installed to $nodeDir\ (portable)"
                 $script:HasNode = $true
 
                 Remove-Item -Force $tmpZip -ErrorAction SilentlyContinue
@@ -1019,16 +1026,13 @@ function Install-Repository {
         $cloneSuccess = $false
 
         # Fix Windows git "copy-fd: write returned: Invalid argument" error.
-        # Git for Windows can fail on atomic file operations (hook templates,
-        # config lock files) due to antivirus, OneDrive, or NTFS filter drivers.
-        # The -c flag injects config before any file I/O occurs.
         Write-Info "Configuring git for Windows compatibility..."
         $env:GIT_CONFIG_COUNT = "1"
         $env:GIT_CONFIG_KEY_0 = "windows.appendAtomically"
         $env:GIT_CONFIG_VALUE_0 = "false"
         git config --global windows.appendAtomically false 2>$null
 
-        # Try SSH first, then HTTPS, with -c flag for atomic write fix
+        # Try SSH first, then HTTPS via proxy/mirror, then plain HTTPS
         Write-Info "Trying SSH clone..."
         $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=5"
         try {
@@ -1371,43 +1375,14 @@ except Exception:
 }
 
 function Set-PathVariable {
-    Write-Info "Setting up hermes command..."
-    
-    if ($NoVenv) {
-        $hermesBin = "$InstallDir"
-    } else {
-        $hermesBin = "$InstallDir\venv\Scripts"
-    }
-    
-    # Add the venv Scripts dir to user PATH so hermes is globally available
-    # On Windows, the hermes.exe in venv\Scripts\ has the venv Python baked in
-    $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    
-    if ($currentPath -notlike "*$hermesBin*") {
-        [Environment]::SetEnvironmentVariable(
-            "Path",
-            "$hermesBin;$currentPath",
-            "User"
-        )
-        Write-Success "Added to user PATH: $hermesBin"
-    } else {
-        Write-Info "PATH already configured"
-    }
+    Write-Info "Skipping system PATH modification (portable mode)..."
+    Write-Info "Use hermes启动.bat to launch Hermes from the install directory."
     
     # Set HERMES_HOME so the Python code finds config/data in the right place.
-    # Only needed on Windows where we install to %LOCALAPPDATA%\hermes instead
-    # of the Unix default ~/.hermes
-    $currentHermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
-    if (-not $currentHermesHome -or $currentHermesHome -ne $HermesHome) {
-        [Environment]::SetEnvironmentVariable("HERMES_HOME", $HermesHome, "User")
-        Write-Success "Set HERMES_HOME=$HermesHome"
-    }
+    # This is the only env var we set, and it's scoped to this session.
     $env:HERMES_HOME = $HermesHome
     
-    # Update current session
-    $env:Path = "$hermesBin;$env:Path"
-    
-    Write-Success "hermes command ready"
+    Write-Success "hermes command ready (via batch files)"
 }
 
 function Copy-ConfigTemplates {
@@ -1940,6 +1915,97 @@ function Start-GatewayIfConfigured {
     }
 }
 
+# ============================================================================
+# Batch file generation (portable, double-clickable)
+# ============================================================================
+
+function New-StartBat {
+    $batPath = Join-Path $InstallDir "hermes启动.bat"
+    $content = @"
+@echo off
+chcp 65001 >nul 2>&1
+title Hermes Agent
+cd /d "%~dp0"
+if exist "venv\Scripts\hermes.exe" (
+    call venv\Scripts\hermes.exe %*
+) else if exist "venv\bin\hermes.exe" (
+    call venv\bin\hermes.exe %*
+) else (
+    echo Error: hermes.exe not found. Please reinstall.
+    pause
+)
+"@
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
+    Write-Success "Created hermes启动.bat"
+}
+
+function New-StopBat {
+    $batPath = Join-Path $InstallDir "hermes停止.bat"
+    $content = @"
+@echo off
+chcp 65001 >nul 2>&1
+title Stopping Hermes Agent
+cd /d "%~dp0"
+
+echo Searching for Hermes process...
+for /f "tokens=2" %%a in ('tasklist /FI "IMAGENAME eq hermes.exe" /fo list ^| find "PID:"') do (
+    echo Stopping Hermes process PID: %%a
+    taskkill /F /PID %%a >nul 2>&1
+    echo Hermes process stopped.
+    goto :done
+)
+
+echo Hermes process not found (may already be stopped).
+:done
+pause
+"@
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
+    Write-Success "Created hermes停止.bat"
+}
+
+function New-UpdateBat {
+    $batPath = Join-Path $InstallDir "hermes更新.bat"
+    $content = @"
+@echo off
+chcp 65001 >nul 2>&1
+title Hermes Agent Update
+cd /d "%~dp0"
+
+echo ============================================
+echo   Hermes Agent Update
+echo ============================================
+echo.
+
+if exist "git\cmd\git.exe" (
+    echo Using bundled Git...
+    set PATH=%~dp0git\cmd;%~dp0git\bin;%~dp0git\usr\bin;%PATH%
+) else if exist "git\bin\bash.exe" (
+    set PATH=%~dp0git\cmd;%~dp0git\bin;%~dp0git\usr\bin;%PATH%
+)
+
+if exist "venv\Scripts\python.exe" (
+    echo Checking for updates...
+    cd /d "%~dp0"
+    "venv\Scripts\python.exe" -m hermes_cli.main update
+) else (
+    echo Error: venv not found. Please reinstall.
+    pause
+    exit /b 1
+)
+
+echo.
+echo ============================================
+echo   Update complete!
+echo ============================================
+pause
+"@
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
+    Write-Success "Created hermes更新.bat"
+}
+
 function Write-Completion {
     Write-Host ""
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Green
@@ -1947,40 +2013,33 @@ function Write-Completion {
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Green
     Write-Host ""
     
-    # Show file locations
-    Write-Host "* Your files:" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "   Config:    " -NoNewline -ForegroundColor Yellow
-    Write-Host "$HermesHome\config.yaml"
-    Write-Host "   API Keys:  " -NoNewline -ForegroundColor Yellow
-    Write-Host "$HermesHome\.env"
-    Write-Host "   Data:      " -NoNewline -ForegroundColor Yellow
-    Write-Host "$HermesHome\cron\, sessions\, logs\"
-    Write-Host "   Code:      " -NoNewline -ForegroundColor Yellow
-    Write-Host "$HermesHome\hermes-agent\"
-    Write-Host ""
+    # Generate portable batch files
+    New-StartBat
+    New-StopBat
+    New-UpdateBat
     
-    Write-Host "---------------------------------------------------------" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "* Commands:" -ForegroundColor Cyan
+    Write-Host "* Installation directory:" -ForegroundColor Cyan
+    Write-Host "  $InstallDir" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "   hermes              " -NoNewline -ForegroundColor Green
+    Write-Host "* Double-click to run:" -ForegroundColor Cyan
+    Write-Host "  hermes启动.bat        " -NoNewline -ForegroundColor Green
+    Write-Host "Start Hermes"
+    Write-Host "  hermes停止.bat        " -NoNewline -ForegroundColor Green
+    Write-Host "Stop Hermes"
+    Write-Host "  hermes更新.bat        " -NoNewline -ForegroundColor Green
+    Write-Host "Update Hermes"
+    Write-Host ""
+    Write-Host "* Data & Config:" -ForegroundColor Cyan
+    Write-Host "  $HermesHome" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "* Manual commands (restart terminal first):" -ForegroundColor Cyan
+    Write-Host "  hermes              " -NoNewline -ForegroundColor Green
     Write-Host "Start chatting"
-    Write-Host "   hermes setup        " -NoNewline -ForegroundColor Green
+    Write-Host "  hermes setup        " -NoNewline -ForegroundColor Green
     Write-Host "Configure API keys & settings"
-    Write-Host "   hermes config       " -NoNewline -ForegroundColor Green
-    Write-Host "View/edit configuration"
-    Write-Host "   hermes config edit  " -NoNewline -ForegroundColor Green
-    Write-Host "Open config in editor"
-    Write-Host "   hermes gateway      " -NoNewline -ForegroundColor Green
-    Write-Host "Start messaging gateway (Telegram, Discord, etc.)"
-    Write-Host "   hermes update       " -NoNewline -ForegroundColor Green
-    Write-Host "Update to latest version"
-    Write-Host ""
-    
-    Write-Host "---------------------------------------------------------" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "[*] Restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
+    Write-Host "  hermes gateway      " -NoNewline -ForegroundColor Green
+    Write-Host "Start messaging gateway"
     Write-Host ""
     
     if (-not $HasNode) {
