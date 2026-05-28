@@ -1026,6 +1026,8 @@ function Install-Repository {
         $cloneSuccess = $false
 
         # Fix Windows git "copy-fd: write returned: Invalid argument" error.
+        # Refresh PATH from registry so git is findable even after directory wipe.
+        Sync-EnvPath
         Write-Info "Configuring git for Windows compatibility..."
         $env:GIT_CONFIG_COUNT = "1"
         $env:GIT_CONFIG_KEY_0 = "windows.appendAtomically"
