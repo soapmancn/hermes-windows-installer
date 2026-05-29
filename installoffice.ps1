@@ -1308,7 +1308,7 @@ except Exception:
 
 function Set-PathVariable {
     Write-Info "Skipping system PATH modification (portable mode)..."
-    Write-Info "Use $PortableRoot\hermes启动.bat to launch Hermes from the portable directory."
+    Write-Info "Use $PortableRoot\hermes-start.bat to launch Hermes from the portable directory."
     
     # Set HERMES_HOME so the Python code finds config/data in the right place.
     # This is the only env var we set, and it's scoped to this session.
@@ -1859,7 +1859,7 @@ function Start-GatewayIfConfigured {
 # ============================================================================
 
 function New-StartBat {
-    $batPath = Join-Path $PortableRoot "hermes启动.bat"
+    $batPath = Join-Path $PortableRoot "hermes-start.bat"
     $content = @"
 @echo off
 chcp 65001 >nul 2>&1
@@ -1894,7 +1894,7 @@ set "HERMES_CURRENT_ROOT=%HERMES_ROOT:~0,-1%"
 if exist "%HERMES_ROOT%install-root.txt" (
     set /p HERMES_OLD_ROOT=<"%HERMES_ROOT%install-root.txt"
     if /I not "!HERMES_OLD_ROOT!"=="%HERMES_CURRENT_ROOT%" (
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%HERMES_ROOT%hermes修复路径.ps1" -Root "%HERMES_CURRENT_ROOT%" -OldRoot "!HERMES_OLD_ROOT!"
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%HERMES_ROOT%hermes-relocate.ps1" -Root "%HERMES_CURRENT_ROOT%" -OldRoot "!HERMES_OLD_ROOT!"
     )
 )
 
@@ -1909,11 +1909,11 @@ if exist "venv\Scripts\python.exe" (
 "@
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
-    Write-Success "Created hermes启动.bat"
+    Write-Success "Created hermes-start.bat"
 }
 
 function New-StopBat {
-    $batPath = Join-Path $PortableRoot "hermes停止.bat"
+    $batPath = Join-Path $PortableRoot "hermes-stop.bat"
     $content = @"
 @echo off
 chcp 65001 >nul 2>&1
@@ -1939,11 +1939,11 @@ pause
 "@
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
-    Write-Success "Created hermes停止.bat"
+    Write-Success "Created hermes-stop.bat"
 }
 
 function New-UpdateBat {
-    $batPath = Join-Path $PortableRoot "hermes更新.bat"
+    $batPath = Join-Path $PortableRoot "hermes-update.bat"
     $content = @"
 @echo off
 chcp 65001 >nul 2>&1
@@ -1978,7 +1978,7 @@ set "HERMES_CURRENT_ROOT=%HERMES_ROOT:~0,-1%"
 if exist "%HERMES_ROOT%install-root.txt" (
     set /p HERMES_OLD_ROOT=<"%HERMES_ROOT%install-root.txt"
     if /I not "!HERMES_OLD_ROOT!"=="%HERMES_CURRENT_ROOT%" (
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%HERMES_ROOT%hermes修复路径.ps1" -Root "%HERMES_CURRENT_ROOT%" -OldRoot "!HERMES_OLD_ROOT!"
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%HERMES_ROOT%hermes-relocate.ps1" -Root "%HERMES_CURRENT_ROOT%" -OldRoot "!HERMES_OLD_ROOT!"
     )
 )
 
@@ -2039,11 +2039,11 @@ exit /b 1
 "@
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
-    Write-Success "Created hermes更新.bat"
+    Write-Success "Created hermes-update.bat"
 }
 
 function New-RelocateScript {
-    $scriptPath = Join-Path $PortableRoot "hermes修复路径.ps1"
+    $scriptPath = Join-Path $PortableRoot "hermes-relocate.ps1"
     $content = @'
 param(
     [string]$Root = (Split-Path -Parent $PSCommandPath),
@@ -2085,7 +2085,7 @@ Write-Host "Relocate done."
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($scriptPath, $content, $utf8NoBom)
     [System.IO.File]::WriteAllText((Join-Path $PortableRoot "install-root.txt"), $PortableRoot, [System.Text.Encoding]::ASCII)
-    Write-Success "Created hermes修复路径.ps1"
+    Write-Success "Created hermes-relocate.ps1"
 }
 
 function New-PortableLaunchers {
@@ -2111,22 +2111,22 @@ function Write-Completion {
     Write-Host "  Source: $InstallDir" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "* Double-click to run:" -ForegroundColor Cyan
-    Write-Host "  hermes启动.bat        " -NoNewline -ForegroundColor Green
+    Write-Host "  hermes-start.bat     " -NoNewline -ForegroundColor Green
     Write-Host "Start Hermes"
-    Write-Host "  hermes停止.bat        " -NoNewline -ForegroundColor Green
+    Write-Host "  hermes-stop.bat      " -NoNewline -ForegroundColor Green
     Write-Host "Stop Hermes"
-    Write-Host "  hermes更新.bat        " -NoNewline -ForegroundColor Green
+    Write-Host "  hermes-update.bat    " -NoNewline -ForegroundColor Green
     Write-Host "Update Hermes"
     Write-Host ""
     Write-Host "* Data & Config:" -ForegroundColor Cyan
     Write-Host "  $HermesHome" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "* Manual commands (restart terminal first):" -ForegroundColor Cyan
-    Write-Host "  .\hermes启动.bat        " -NoNewline -ForegroundColor Green
+    Write-Host "  .\hermes-start.bat      " -NoNewline -ForegroundColor Green
     Write-Host "Start chatting"
-    Write-Host "  .\hermes启动.bat setup  " -NoNewline -ForegroundColor Green
+    Write-Host "  .\hermes-start.bat setup" -NoNewline -ForegroundColor Green
     Write-Host "Configure API keys & settings"
-    Write-Host "  .\hermes启动.bat gateway" -NoNewline -ForegroundColor Green
+    Write-Host "  .\hermes-start.bat gateway" -NoNewline -ForegroundColor Green
     Write-Host "Start messaging gateway"
     Write-Host ""
     
