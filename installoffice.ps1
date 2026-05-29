@@ -683,43 +683,93 @@ function Test-Node {
     Write-Info "Downloading portable Node.js $NodeVersion to $nodeDir\ ..."
     Write-Info "(no admin rights required; isolated from any system Node install)"
     try {
-        $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
-        # Use npmmirror.com for China-mainland fast download
-        if ($NODE_MIRROR_BASE) {
-            $indexUrl = "$NODE_MIRROR_BASE/latest-v${NodeVersion}.x/"
+        $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") {
+            "arm64"
+        } elseif ([Environment]::Is64BitOperatingSystem) {
+            "x64"
         } else {
-            $indexUrl = "https://nodejs.org/dist/latest-v${NodeVersion}.x/"
+            "x86"
         }
-        $indexPage = Invoke-WebRequest -Uri $indexUrl -UseBasicParsing
-        $zipName = ($indexPage.Content | Select-String -Pattern "node-v${NodeVersion}\.\d+\.\d+-win-${arch}\.zip" -AllMatches).Matches[0].Value
+        $zipName = $null
+        $versionDir = $null
+        $fileKey = "win-$arch-zip"
 
-        if ($zipName) {
-            $downloadUrl = "${indexUrl}${zipName}"
-            $tmpZip = "$env:TEMP\$zipName"
-            $tmpDir = "$env:TEMP\hermes-node-extract"
-
-            $downloadOk = Invoke-DownloadFile @($downloadUrl, "https://nodejs.org/dist/latest-v${NodeVersion}.x/$zipName") $tmpZip
-            if (-not $downloadOk) { throw "Node.js download failed" }
-            if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
-            Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
-
-            $extractedDir = Get-ChildItem $tmpDir -Directory | Select-Object -First 1
-            if ($extractedDir) {
-                if (Test-Path $nodeDir) { Remove-Item -Recurse -Force $nodeDir }
-                Move-Item $extractedDir.FullName $nodeDir
-
-                # Session PATH so the rest of this run sees node/npm.
-                $env:Path = "$nodeDir;$env:Path"
-
-                $version = & "$nodeDir\node.exe" --version
-                Write-Success "Node.js $version installed to $nodeDir\ (portable)"
-                $script:HasNode = $true
-
-                Remove-Item -Force $tmpZip -ErrorAction SilentlyContinue
-                Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
-                return $true
+        # Prefer index.json. Directory listings differ between mirrors and can
+        # omit href text, which is what caused the old Null-array error.
+        foreach ($idx in @(
+            "$($NODE_MIRROR_BASE.TrimEnd('/'))/index.json",
+            "https://nodejs.org/dist/index.json"
+        )) {
+            if ([string]::IsNullOrWhiteSpace($idx) -or $idx -like "/index.json") { continue }
+            try {
+                Write-Info "Reading Node index $idx"
+                $json = (Invoke-WebRequest -Uri $idx -UseBasicParsing -TimeoutSec 120).Content | ConvertFrom-Json
+                $release = $json |
+                    Where-Object { $_.version -match "^v$NodeVersion\." -and $_.files -contains $fileKey } |
+                    Select-Object -First 1
+                if ($release) {
+                    $versionDir = $release.version
+                    $zipName = "node-$versionDir-win-$arch.zip"
+                    break
+                }
+            } catch {
+                Write-Warn "Node index failed: $idx"
             }
         }
+
+        if (-not $zipName) {
+            foreach ($dirUrl in @(
+                "$($NODE_MIRROR_BASE.TrimEnd('/'))/latest-v${NodeVersion}.x/",
+                "https://nodejs.org/dist/latest-v${NodeVersion}.x/"
+            )) {
+                if ([string]::IsNullOrWhiteSpace($dirUrl) -or $dirUrl -like "/latest-v${NodeVersion}.x/") { continue }
+                try {
+                    Write-Info "Reading Node directory $dirUrl"
+                    $html = (Invoke-WebRequest -Uri $dirUrl -UseBasicParsing -TimeoutSec 120).Content
+                    $match = [regex]::Match($html, "node-v$NodeVersion\.\d+\.\d+-win-$([regex]::Escape($arch))\.zip")
+                    if ($match.Success) {
+                        $zipName = $match.Value
+                        $versionDir = $zipName -replace "^node-(v\d+\.\d+\.\d+)-win-.+$", '$1'
+                        break
+                    }
+                } catch {
+                    Write-Warn "Node directory failed: $dirUrl"
+                }
+            }
+        }
+
+        if (-not $zipName -or -not $versionDir) {
+            throw "Cannot find Node.js $NodeVersion Windows $arch zip from mirror or nodejs.org"
+        }
+
+        $tmpZip = Join-Path $PortableRoot "tmp\$zipName"
+        $tmpDir = Join-Path $PortableRoot "tmp\node-extract"
+        $downloadOk = Invoke-DownloadFile @(
+            "$($NODE_MIRROR_BASE.TrimEnd('/'))/$versionDir/$zipName",
+            "$($NODE_MIRROR_BASE.TrimEnd('/'))/latest-v${NodeVersion}.x/$zipName",
+            "https://nodejs.org/dist/$versionDir/$zipName",
+            "https://nodejs.org/dist/latest-v${NodeVersion}.x/$zipName"
+        ) $tmpZip
+        if (-not $downloadOk) { throw "Node.js download failed" }
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
+
+        $extractedDir = Get-ChildItem $tmpDir -Directory | Select-Object -First 1
+        if (-not $extractedDir) { throw "Node.js archive extracted without a top-level directory" }
+
+        if (Test-Path $nodeDir) { Remove-Item -Recurse -Force $nodeDir }
+        Move-Item $extractedDir.FullName $nodeDir
+
+        # Session PATH so the rest of this run sees node/npm.
+        $env:Path = "$nodeDir;$env:Path"
+
+        $version = & "$nodeDir\node.exe" --version
+        Write-Success "Node.js $version installed to $nodeDir\ (portable)"
+        $script:HasNode = $true
+
+        Remove-Item -Force $tmpZip -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        return $true
     } catch {
         Write-Warn "Portable Node.js download failed: $_"
     }
