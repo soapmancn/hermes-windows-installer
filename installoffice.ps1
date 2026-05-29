@@ -8,7 +8,7 @@
 # Downloads are optimized for China mainland users via mirrors.
 #
 # Usage:
-#   .\installoffice.ps1 -InstallDir "D:\hermes-agent"
+#   .\installoffice.ps1 -InstallDir "D:\hermes"
 #
 # ============================================================================
 
@@ -23,7 +23,9 @@ param(
     # exact ref.  Precedence: Commit > Tag > Branch.
     [string]$Commit = "",
     [string]$Tag = "",
-    # HermesHome is now UNDER InstallDir (portable, no system dependency)
+    # Portable root. The Hermes source checkout lives under
+    # $InstallDir\hermes-agent; runtimes, caches, data, and .bat launchers live
+    # directly under $InstallDir so the whole directory can be copied.
     [string]$InstallDir,
 
     # --- Stage protocol (additive; default invocation behaves as before) ----
@@ -44,16 +46,18 @@ param(
 
 # Require InstallDir to be specified -- everything goes under it
 if (-not $InstallDir) {
-    Write-Err "Please specify -InstallDir, e.g. -InstallDir ""D:\hermes-agent"""
+    Write-Err "Please specify -InstallDir, e.g. -InstallDir ""D:\hermes"""
     Write-Info "All code, dependencies and data will be installed under this directory."
     exit 1
 }
 
 # Normalize path: remove trailing backslash if present
-$InstallDir = $InstallDir.TrimEnd('\')
+$PortableRoot = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
 
-# HermesHome is now a subdirectory of InstallDir (portable)
-$HermesHome = Join-Path $InstallDir ".hermes"
+# Source checkout directory. Keep the historical $InstallDir variable for the
+# many repo-local operations below, but use $PortableRoot for portable runtimes.
+$InstallDir = Join-Path $PortableRoot "hermes-agent"
+$HermesHome = Join-Path $PortableRoot ".hermes"
 $PythonVersion = "3.12"
 $NodeVersion = "24"
 
@@ -70,7 +74,16 @@ $InstallStageProtocolVersion = 1
 $GIT_MIRROR_PREFIX = "https://ghfast.top"  # China-friendly GitHub proxy mirror
 $GIT_PROXY = ""              # e.g. "http://127.0.0.1:7890" (set if you use a proxy)
 $PYTHON_MIRROR = ""          # e.g. "https://registry.npmmirror.com" or "https://py.sjtu.edu.cn"
-$NODE_MIRROR_BASE = ""       # e.g. "https://npmmirror.com/mirrors/node" or "https://registry.npmmirror.com/-/binary/node"
+$NODE_MIRROR_BASE = "https://npmmirror.com/mirrors/node"
+$NPM_REGISTRY = "https://registry.npmmirror.com"
+$PYPI_INDEX = "https://pypi.tuna.tsinghua.edu.cn/simple"
+$UV_VERSION = "0.8.15"
+
+function Get-ProxiedUrl {
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($GIT_MIRROR_PREFIX)) { return $Url }
+    return "$($GIT_MIRROR_PREFIX.TrimEnd('/'))/$Url"
+}
 
 function Get-GitCloneUrl {
     param([string]$baseUrl)
@@ -118,7 +131,7 @@ function Write-Banner {
     Write-Host "|             * Hermes Agent Installer                    |" -ForegroundColor Magenta
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
     Write-Host "|  An open source AI agent by Nous Research.              |" -ForegroundColor Magenta
-    Write-Host "|  Portable mode: all data under $InstallDir              |" -ForegroundColor Magenta
+    Write-Host "|  Portable mode: all data under $PortableRoot              |" -ForegroundColor Magenta
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
     Write-Host ""
 }
@@ -143,6 +156,102 @@ function Write-Err {
     Write-Host "[X] $Message" -ForegroundColor Red
 }
 
+function Initialize-PortableLayout {
+    foreach ($dir in @(
+        $PortableRoot,
+        (Join-Path $PortableRoot "bin"),
+        (Join-Path $PortableRoot "cache\npm"),
+        (Join-Path $PortableRoot "cache\uv"),
+        (Join-Path $PortableRoot "logs"),
+        (Join-Path $PortableRoot "tmp"),
+        $HermesHome
+    )) {
+        if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+    }
+}
+
+function Set-PortableSessionEnv {
+    Initialize-PortableLayout
+
+    $env:HERMES_ROOT = $PortableRoot
+    $env:HERMES_HOME = $HermesHome
+    $env:HERMES_AGENT_DIR = $InstallDir
+    $env:HERMES_GIT_BASH_PATH = Join-Path $PortableRoot "git\bin\bash.exe"
+
+    $env:NPM_CONFIG_PREFIX = Join-Path $PortableRoot "npm-global"
+    $env:npm_config_prefix = $env:NPM_CONFIG_PREFIX
+    $env:NPM_CONFIG_CACHE = Join-Path $PortableRoot "cache\npm"
+    $env:npm_config_cache = $env:NPM_CONFIG_CACHE
+    $env:NPM_CONFIG_REGISTRY = $NPM_REGISTRY
+    $env:npm_config_registry = $NPM_REGISTRY
+
+    $env:UV_INSTALL_DIR = Join-Path $PortableRoot "uv"
+    $env:UV_PYTHON_INSTALL_DIR = Join-Path $PortableRoot "uv-python"
+    $env:UV_PYTHON_CACHE_DIR = Join-Path $PortableRoot "cache\uv\python"
+    $env:UV_CACHE_DIR = Join-Path $PortableRoot "cache\uv"
+    $env:UV_PYTHON_PREFERENCE = "only-managed"
+    $env:UV_PYTHON_NO_REGISTRY = "1"
+    $env:UV_DEFAULT_INDEX = $PYPI_INDEX
+    $env:UV_INDEX_URL = $PYPI_INDEX
+    $env:PIP_INDEX_URL = $PYPI_INDEX
+    if ($GIT_MIRROR_PREFIX) {
+        $env:UV_PYTHON_INSTALL_MIRROR = Get-ProxiedUrl "https://github.com/astral-sh/python-build-standalone/releases/download"
+        $env:HERMES_GITHUB_PROXY = $GIT_MIRROR_PREFIX
+        $githubProxyBase = Get-ProxiedUrl "https://github.com/"
+        $env:GIT_CONFIG_COUNT = "1"
+        $env:GIT_CONFIG_KEY_0 = "url.${githubProxyBase}.insteadOf"
+        $env:GIT_CONFIG_VALUE_0 = "https://github.com/"
+    }
+
+    $portablePath = @(
+        $PortableRoot,
+        (Join-Path $PortableRoot "bin"),
+        (Join-Path $PortableRoot "node"),
+        (Join-Path $PortableRoot "npm-global"),
+        (Join-Path $PortableRoot "git\cmd"),
+        (Join-Path $PortableRoot "git\bin"),
+        (Join-Path $PortableRoot "git\usr\bin"),
+        (Join-Path $PortableRoot "uv"),
+        (Join-Path $InstallDir "venv\Scripts")
+    ) -join ";"
+    $env:Path = "$portablePath;$env:Path"
+}
+
+function Invoke-DownloadFile {
+    param(
+        [string[]]$Uris,
+        [string]$OutFile
+    )
+
+    $lastError = $null
+    foreach ($uri in $Uris) {
+        if ([string]::IsNullOrWhiteSpace($uri)) { continue }
+        try {
+            Write-Info "Downloading $uri"
+            Invoke-WebRequest -Uri $uri -OutFile $OutFile -UseBasicParsing -TimeoutSec 180
+            if ((Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 0)) { return $true }
+        } catch {
+            $lastError = $_
+            Write-Warn "Download failed, trying next source..."
+        }
+    }
+
+    if ($lastError) { Write-Warn "Last download error: $lastError" }
+    return $false
+}
+
+function Find-PortablePython {
+    $pythonRoot = Join-Path $PortableRoot "uv-python"
+    if (-not (Test-Path $pythonRoot)) { return $null }
+    $py = Get-ChildItem $pythonRoot -Recurse -Filter python.exe -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch "\\venv\\" } |
+        Select-Object -First 1
+    if ($py) { return $py.FullName }
+    return $null
+}
+
 # --- Ensure-mode helpers ---
 
 function Resolve-NpmCmd {
@@ -156,37 +265,6 @@ function Resolve-NpmCmd {
     return $npmExe
 }
 
-function Find-SystemBrowser {
-    $candidates = @(
-        "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
-        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-        "${env:LOCALAPPDATA}\Google\Chrome\Application\chrome.exe",
-        "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
-        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
-        "${env:ProgramFiles}\Chromium\Application\chrome.exe",
-        "${env:LOCALAPPDATA}\Chromium\Application\chrome.exe"
-    )
-    foreach ($p in $candidates) {
-        if (Test-Path $p) { return $p }
-    }
-    return $null
-}
-
-function Write-BrowserEnv {
-    param([string]$BrowserPath)
-    if (-not (Test-Path $HermesHome)) {
-        New-Item -ItemType Directory -Force -Path $HermesHome | Out-Null
-    }
-    $envFile = Join-Path $HermesHome ".env"
-    if (-not (Test-Path $envFile)) {
-        Set-Content -Path $envFile -Value "AGENT_BROWSER_EXECUTABLE_PATH=$BrowserPath" -Encoding UTF8
-        return
-    }
-    $content = Get-Content $envFile -Raw -ErrorAction SilentlyContinue
-    if ($content -and $content -match "AGENT_BROWSER_EXECUTABLE_PATH=") { return }
-    Add-Content -Path $envFile -Value "AGENT_BROWSER_EXECUTABLE_PATH=$BrowserPath" -Encoding UTF8
-}
-
 function Install-AgentBrowser {
     param([switch]$SkipChromium)
     $npm = Resolve-NpmCmd
@@ -196,14 +274,14 @@ function Install-AgentBrowser {
     }
 
     Write-Info "Installing agent-browser via npm -g --prefix..."
-    $prefixDir = Join-Path $InstallDir "node"
+    $prefixDir = Join-Path $PortableRoot "node"
     if (-not (Test-Path $prefixDir)) {
         New-Item -ItemType Directory -Path $prefixDir -Force | Out-Null
     }
     $npmLog = [System.IO.Path]::GetTempFileName()
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $npm install -g --prefix $prefixDir --silent --ignore-scripts "agent-browser@^0.26.0" "@askjo/camofox-browser@^1.5.2" 2>&1 | Tee-Object -FilePath $npmLog | Out-Null
+    & $npm install -g --prefix $prefixDir --registry $NPM_REGISTRY --silent --ignore-scripts "agent-browser@^0.26.0" "@askjo/camofox-browser@^1.5.2" 2>&1 | Tee-Object -FilePath $npmLog | Out-Null
     $npmExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
     if ($npmExit -ne 0) {
@@ -215,28 +293,23 @@ function Install-AgentBrowser {
     Remove-Item $npmLog -Force -ErrorAction SilentlyContinue
 
     if (-not $SkipChromium) {
-        $sysBrowser = Find-SystemBrowser
-        if ($sysBrowser) {
-            Write-BrowserEnv -BrowserPath $sysBrowser
-            Write-Info "System browser detected -- skipping Chromium download"
-        } else {
-            $abExe = Join-Path $prefixDir "agent-browser.cmd"
-            if (Test-Path $abExe) {
-                Write-Info "Installing Chromium via agent-browser install..."
-                $abLog = [System.IO.Path]::GetTempFileName()
-                $prevEAP = $ErrorActionPreference
-                $ErrorActionPreference = "Continue"
-                & $abExe install 2>&1 | Tee-Object -FilePath $abLog | Out-Null
-                $abExit = $LASTEXITCODE
-                $ErrorActionPreference = $prevEAP
-                if ($abExit -ne 0) {
-                    $abDetail = Get-Content $abLog -Raw -ErrorAction SilentlyContinue
-                    Write-Warn "Chromium install failed (exit $abExit): $abDetail"
-                }
-                Remove-Item $abLog -Force -ErrorAction SilentlyContinue
-            } else {
-                Write-Warn "agent-browser.cmd not found at $abExe"
+        $abExe = Join-Path $prefixDir "agent-browser.cmd"
+        if (Test-Path $abExe) {
+            Write-Info "Installing Chromium via agent-browser install..."
+            $abLog = [System.IO.Path]::GetTempFileName()
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $PortableRoot "ms-playwright"
+            & $abExe install 2>&1 | Tee-Object -FilePath $abLog | Out-Null
+            $abExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEAP
+            if ($abExit -ne 0) {
+                $abDetail = Get-Content $abLog -Raw -ErrorAction SilentlyContinue
+                Write-Warn "Chromium install failed (exit $abExit): $abDetail"
             }
+            Remove-Item $abLog -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Warn "agent-browser.cmd not found at $abExe"
         }
     }
     Write-Success "Agent-browser ready"
@@ -248,41 +321,20 @@ function Install-AgentBrowser {
 
 function Install-Uv {
     Write-Info "Checking for uv package manager..."
-    
-    # Check if uv is already available
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
-        $version = uv --version
-        $script:UvCmd = "uv"
-        Write-Success "uv found ($version)"
-        return $true
-    }
-    
-    # Check under InstallDir first (portable install)
-    $uvUnderInstallDir = Join-Path $InstallDir "uv\uv.exe"
+
+    # Always prefer the portable uv under the selected root. A system uv may be
+    # used by the installer's parent shell, but the finished copy must carry
+    # its own uv.exe so updates work on another Windows computer.
+    $uvUnderInstallDir = Join-Path $PortableRoot "uv\uv.exe"
     if (Test-Path $uvUnderInstallDir) {
         $script:UvCmd = $uvUnderInstallDir
         $version = & $uvUnderInstallDir --version
-        Write-Success "uv found under InstallDir ($version)"
+        Write-Success "uv found under portable root ($version)"
         return $true
     }
-    
-    # Check common install locations
-    $uvPaths = @(
-        "$env:USERPROFILE\.local\bin\uv.exe",
-        "$env:USERPROFILE\.cargo\bin\uv.exe"
-    )
-    foreach ($uvPath in $uvPaths) {
-        if (Test-Path $uvPath) {
-            $script:UvCmd = $uvPath
-            $version = & $uvPath --version
-            Write-Success "uv found at $uvPath ($version)"
-            return $true
-        }
-    }
-    
-    # Install uv to InstallDir (portable)
-    Write-Info "Installing uv to $InstallDir\uv (portable)..."
-    $uvDir = Join-Path $InstallDir "uv"
+
+    Write-Info "Installing uv to $PortableRoot\uv (portable)..."
+    $uvDir = Join-Path $PortableRoot "uv"
     if (-not (Test-Path $uvDir)) {
         New-Item -ItemType Directory -Path $uvDir -Force | Out-Null
     }
@@ -291,13 +343,28 @@ function Install-Uv {
     try {
         $ErrorActionPreference = "Continue"
         
-        # Download uv standalone binary directly (no shell script installer)
-        # This avoids the nested powershell -c "irm | iex" pattern
-        $uvExeUrl = "https://astral.sh/uv/latest/windows/uv.exe"
+        $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") { "aarch64" } else { "x86_64" }
+        $asset = "uv-$arch-pc-windows-msvc.zip"
+        $zipPath = Join-Path $PortableRoot "tmp\$asset"
+        $extractPath = Join-Path $PortableRoot "tmp\uv-extract"
         $uvExeDest = Join-Path $uvDir "uv.exe"
-        
-        Write-Info "Downloading uv from $uvExeUrl ..."
-        Invoke-WebRequest -Uri $uvExeUrl -OutFile $uvExeDest -UseBasicParsing
+
+        if (Test-Path $extractPath) { Remove-Item -Recurse -Force $extractPath -ErrorAction SilentlyContinue }
+        $downloadOk = Invoke-DownloadFile @(
+            (Get-ProxiedUrl "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$asset"),
+            "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$asset"
+        ) $zipPath
+        if ($downloadOk) {
+            Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+            $downloadedUv = Get-ChildItem $extractPath -Recurse -Filter uv.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $downloadedUv) { throw "uv.exe was not found in downloaded archive" }
+            Copy-Item $downloadedUv.FullName $uvExeDest -Force
+        } else {
+            $downloadOk = Invoke-DownloadFile @("https://astral.sh/uv/latest/windows/uv.exe") $uvExeDest
+            if (-not $downloadOk) { throw "uv download failed" }
+        }
+        Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $extractPath -ErrorAction SilentlyContinue
         
         $ErrorActionPreference = $prevEAP
 
@@ -327,7 +394,7 @@ function Install-Uv {
 # from the registry so every Invoke-Stage starts from a fresh, up-to-date
 # PATH view.  Cheap (registry reads, no I/O elsewhere) and idempotent.
 function Sync-EnvPath {
-    $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
+    Set-PortableSessionEnv
 }
 
 # Re-discover uv without re-installing it.  Cross-process stage drivers
@@ -344,56 +411,31 @@ function Resolve-UvCmd {
     # Already resolved (default invocation path: Install-Uv ran earlier
     # in the same process and set $script:UvCmd).
     if ($script:UvCmd) {
-        if ($script:UvCmd -eq "uv") {
-            # "uv" on PATH -- verify it's still resolvable (PATH could have
-            # changed mid-session; cheap to recheck).
-            if (Get-Command uv -ErrorAction SilentlyContinue) { return }
-        } elseif (Test-Path $script:UvCmd) {
+        if (($script:UvCmd -ne "uv") -and (Test-Path $script:UvCmd)) {
             return
         }
         # Stale; fall through to re-discover.
     }
 
-    # Try PATH first (covers `winget install astral.uv`, manual installs,
-    # and the post-Install-Uv state where uv.exe lives in
-    # %USERPROFILE%\.local\bin which the installer added to PATH).
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
-        $script:UvCmd = "uv"
+    $portableUv = Join-Path $PortableRoot "uv\uv.exe"
+    if (Test-Path $portableUv) {
+        $script:UvCmd = $portableUv
         return
     }
 
-    # Refresh PATH from registry in case the current process started before
-    # Install-Uv updated User PATH.
-    $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
-        $script:UvCmd = "uv"
-        return
-    }
-
-    # Check the well-known install locations the astral.sh installer drops
-    # uv into.  Mirrors the probe order Install-Uv uses.
-    foreach ($uvPath in @("$env:USERPROFILE\.local\bin\uv.exe", "$env:USERPROFILE\.cargo\bin\uv.exe")) {
-        if (Test-Path $uvPath) {
-            $script:UvCmd = $uvPath
-            return
-        }
-    }
-
-    throw "uv is not installed or not on PATH. Run install.ps1 -Stage uv first."
+    throw "portable uv is not installed. Run installoffice.ps1 -Stage uv first."
 }
 
 function Test-Python {
     Write-Info "Checking Python $PythonVersion..."
-    
-    # Let uv find or install Python
-    try {
-        $pythonPath = & $UvCmd python find $PythonVersion 2>$null
-        if ($pythonPath) {
-            $ver = & $pythonPath --version 2>$null
-            Write-Success "Python found: $ver"
-            return $true
-        }
-    } catch { }
+
+    $portablePython = Find-PortablePython
+    if ($portablePython) {
+        $ver = & $portablePython --version 2>$null
+        $script:PythonCmd = $portablePython
+        Write-Success "Portable Python found: $ver"
+        return $true
+    }
     
     # Python not found -- use uv to install it (no admin needed!)
     Write-Info "Python $PythonVersion not found, installing via uv..."
@@ -412,22 +454,17 @@ function Test-Python {
         # semantics or stderr noise.  This fix was previously landed as
         # commit ec1714e71 and then lost in a release squash; reapplied here.
         $ErrorActionPreference = "Continue"
-        # Pin Python to InstallDir so it stays portable (not in uv's default ~/.local)
-        $uvPythonPath = Join-Path $InstallDir "uv-python"
-        & $UvCmd python install $PythonVersion --path $uvPythonPath 2>&1
+        # Pin Python to PortableRoot so it stays portable (not in uv's default ~/.local)
+        $uvPythonPath = Join-Path $PortableRoot "uv-python"
+        New-Item -ItemType Directory -Force -Path $uvPythonPath | Out-Null
+        & $UvCmd python install $PythonVersion --install-dir $uvPythonPath --no-bin 2>&1
         $uvExitCode = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
 
-        # Check if Python is now available (more reliable than exit code
-        # since uv may return non-zero due to "already installed" etc.)
-        $pythonPath = & $UvCmd python find $PythonVersion 2>$null
-        if (-not $pythonPath) {
-            # Python was installed to custom path -- look it up directly
-            $pythonPath = & $UvCmd python list --python $PythonVersion --only-installed 2>$null | Select-Object -First 1
-            if ($pythonPath) { $pythonPath = $pythonPath.Trim() }
-        }
+        $pythonPath = Find-PortablePython
         if ($pythonPath) {
             $ver = & $pythonPath --version 2>$null
+            $script:PythonCmd = $pythonPath
             Write-Success "Python installed: $ver"
             return $true
         }
@@ -443,60 +480,8 @@ function Test-Python {
         Write-Warn "uv python install error: $_"
     }
 
-    # Fallback: check if ANY Python 3.10+ is already available on the system
-    Write-Info "Trying to find any existing Python 3.10+..."
-    foreach ($fallbackVer in @("3.12", "3.13", "3.10")) {
-        try {
-            $pythonPath = & $UvCmd python find $fallbackVer 2>$null
-            if ($pythonPath) {
-                $ver = & $pythonPath --version 2>$null
-                Write-Success "Found fallback: $ver"
-                $script:PythonVersion = $fallbackVer
-                return $true
-            }
-        } catch { }
-    }
-
-    # Fallback: try system python -- but skip the Microsoft Store stub.
-    # On Windows, %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe is a 0-byte
-    # reparse-point stub that prints "Python was not found; run without
-    # arguments to install from the Microsoft Store..." to stdout and exits
-    # non-zero.  Get-Command finds it; invoking it produces a confusing error
-    # that the user sees as our installer crashing.
-    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($pythonCmd) {
-        $isStoreStub = $false
-        try {
-            $pythonSource = $pythonCmd.Source
-            if ($pythonSource -and $pythonSource -like "*\WindowsApps\*") {
-                $isStoreStub = $true
-            } else {
-                # Even outside WindowsApps, a 0-byte file is the stub
-                $item = Get-Item $pythonSource -ErrorAction SilentlyContinue
-                if ($item -and $item.Length -eq 0) { $isStoreStub = $true }
-            }
-        } catch { }
-
-        if (-not $isStoreStub) {
-            try {
-                $prevEAP2 = $ErrorActionPreference
-                $ErrorActionPreference = "Continue"
-                $sysVer = & python --version 2>&1
-                $ErrorActionPreference = $prevEAP2
-                if ($sysVer -match "Python 3\.(1[0-9]|[1-9][0-9])") {
-                    Write-Success "Using system Python: $sysVer"
-                    return $true
-                }
-            } catch {
-                if ($prevEAP2) { $ErrorActionPreference = $prevEAP2 }
-            }
-        }
-    }
-
     Write-Err "Failed to install Python $PythonVersion"
-    Write-Info "Install Python 3.11 manually, then re-run this script:"
-    Write-Info "  https://www.python.org/downloads/"
-    Write-Info "  Or: winget install Python.Python.3.11"
+    Write-Info "Check network access to the uv/python mirror, then re-run this script."
     return $false
 }
 
@@ -511,7 +496,7 @@ function Install-Git {
       1. Existing ``git`` on PATH -- use it as-is (the common fast path).
       2. Download **PortableGit** from the official git-for-windows GitHub
          release (self-extracting 7z.exe) and unpack it to
-         ``%LOCALAPPDATA%\hermes\git`` -- never touches system Git, never
+         ``$PortableRoot\git`` -- never touches system Git, never
          requires admin, works even on locked-down machines and machines
          with a broken system Git install.
 
@@ -525,7 +510,7 @@ function Install-Git {
     We deliberately skip winget because it fails badly when the system Git
     install is in a half-installed state (partially registered, or uninstall-
     blocked).  Owning the Hermes copy of Git ourselves is predictable and
-    recoverable: if it ever breaks, ``Remove-Item %LOCALAPPDATA%\hermes\git``
+    recoverable: if it ever breaks, remove ``$PortableRoot\git``
     and re-running this installer fully recovers.
 
     After install we locate ``bash.exe`` and persist the path in
@@ -534,17 +519,22 @@ function Install-Git {
     #>
     Write-Info "Checking Git..."
 
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        $version = git --version
-        Write-Success "Git found ($version)"
+    $portableGit = Join-Path $PortableRoot "git\cmd\git.exe"
+    if (Test-Path $portableGit) {
+        $gitCmdDir = Join-Path $PortableRoot "git\cmd"
+        $gitBinDir = Join-Path $PortableRoot "git\bin"
+        $gitUsrBinDir = Join-Path $PortableRoot "git\usr\bin"
+        $env:Path = "$gitCmdDir;$gitBinDir;$gitUsrBinDir;$env:Path"
+        $version = & $portableGit --version
+        Write-Success "Portable Git found ($version)"
         Set-GitBashEnvVar
         return $true
     }
 
-    # Download PortableGit into $InstallDir\git (portable).  Always works as long as
+    # Download PortableGit into $PortableRoot\git (portable).  Always works as long as
     # we can reach github.com -- no admin, no winget, no reliance on the
     # user's possibly-broken system Git install.
-    Write-Info "Git not found -- downloading PortableGit to $InstallDir\git\ ..."
+    Write-Info "Git not found -- downloading PortableGit to $PortableRoot\git\ ..."
     Write-Info "(no admin rights required; isolated from any system Git install)"
 
     try {
@@ -580,10 +570,11 @@ function Install-Git {
 
         $downloadUrl = "https://github.com/git-for-windows/git/releases/download/$gitTag/$assetName"
         $tmpFile = "$env:TEMP\$assetName"
-        $gitDir = Join-Path $InstallDir "git"
+        $gitDir = Join-Path $PortableRoot "git"
 
         Write-Info "Downloading $assetName (Git for Windows $gitVerTag)..."
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpFile -UseBasicParsing
+        $downloadOk = Invoke-DownloadFile @((Get-ProxiedUrl $downloadUrl), $downloadUrl) $tmpFile
+        if (-not $downloadOk) { throw "PortableGit download failed" }
 
         if (Test-Path $gitDir) {
             Write-Info "Removing previous Git install at $gitDir ..."
@@ -619,7 +610,7 @@ function Install-Git {
         $env:Path = "$gitDir\cmd;$env:Path"
 
         $version = & $gitExe --version
-        Write-Success "Git $version installed to $gitDir (portable, user-scoped)"
+        Write-Success "Git $version installed to $gitDir (portable)"
         Set-GitBashEnvVar
         return $true
     } catch {
@@ -647,35 +638,16 @@ function Set-GitBashEnvVar {
     # this with a system-Git-only installation anyway.
     #
     # Layouts:
-    #   PortableGit (our default): $InstallDir\git\bin\bash.exe
-    #   MinGit (32-bit fallback):  $InstallDir\git\usr\bin\bash.exe
-    $candidates += (Join-Path $InstallDir "git\bin\bash.exe")      # PortableGit layout (primary)
-    $candidates += (Join-Path $InstallDir "git\usr\bin\bash.exe")  # MinGit / PortableGit usr\bin fallback
-
-    # git.exe on PATH can tell us where the install root is
-    $gitCmd = Get-Command git -ErrorAction SilentlyContinue
-    if ($gitCmd) {
-        $gitExe = $gitCmd.Source
-        # Git for Windows (full installer): <root>\cmd\git.exe + <root>\bin\bash.exe
-        # MinGit:                           <root>\cmd\git.exe + <root>\usr\bin\bash.exe
-        $gitRoot = Split-Path (Split-Path $gitExe -Parent) -Parent
-        $candidates += "$gitRoot\bin\bash.exe"
-        $candidates += "$gitRoot\usr\bin\bash.exe"
-    }
-
-    # Standard system install locations as a final fallback.  Note:
-    # ProgramFiles(x86) can't be referenced via ${env:...} string interpolation
-    # because of the parens -- use [Environment]::GetEnvironmentVariable().
-    $candidates += "${env:ProgramFiles}\Git\bin\bash.exe"
-    $pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
-    if ($pf86) { $candidates += "$pf86\Git\bin\bash.exe" }
-    $candidates += "${env:LocalAppData}\Programs\Git\bin\bash.exe"
+    #   PortableGit (our default): $PortableRoot\git\bin\bash.exe
+    #   MinGit (32-bit fallback):  $PortableRoot\git\usr\bin\bash.exe
+    $candidates += (Join-Path $PortableRoot "git\bin\bash.exe")      # PortableGit layout (primary)
+    $candidates += (Join-Path $PortableRoot "git\usr\bin\bash.exe")  # MinGit / PortableGit usr\bin fallback
 
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path $candidate)) {
             # Store in a local env file so portable Hermes can find bash.exe
             # without modifying system/User environment scope.
-            $localEnvFile = Join-Path $InstallDir ".hermes-bash-path"
+            $localEnvFile = Join-Path $PortableRoot ".hermes-bash-path"
             $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
             [System.IO.File]::WriteAllText($localEnvFile, $candidate, $utf8NoBom)
             $env:HERMES_GIT_BASH_PATH = $candidate
@@ -691,18 +663,11 @@ function Set-GitBashEnvVar {
 function Test-Node {
     Write-Info "Checking Node.js (for browser tools)..."
 
-    if (Get-Command node -ErrorAction SilentlyContinue) {
-        $version = node --version
-        Write-Success "Node.js $version found"
-        $script:HasNode = $true
-        return $true
-    }
-
     # Check our own managed install from a previous run
-    $managedNode = (Join-Path $InstallDir "node\node.exe")
+    $managedNode = (Join-Path $PortableRoot "node\node.exe")
     if (Test-Path $managedNode) {
         $version = & $managedNode --version
-        $env:Path = (Join-Path $InstallDir "node") + ";$env:Path"
+        $env:Path = (Join-Path $PortableRoot "node") + ";$env:Path"
         Write-Success "Node.js $version found (Hermes-managed)"
         $script:HasNode = $true
         return $true
@@ -710,21 +675,18 @@ function Test-Node {
 
     Write-Info "Node.js not found -- installing Node.js $NodeVersion LTS..."
 
-    # Try the portable-zip path FIRST -- no UAC, no admin, no winget MSI.
-    # winget install OpenJS.NodeJS.LTS triggers a system-wide MSI install
-    # which prompts UAC (the dialog often appears minimized in the taskbar
-    # and the install silently waits for consent, looking like a hang).
-    # The portable zip path drops node.exe + npm into $InstallDir\node\
+    # Use the portable-zip path only -- no UAC, no admin, no system MSI.
+    # The portable zip path drops node.exe + npm into $PortableRoot\node\
     # which is portable and isolated.  Same UX guarantee: works on locked-down
     # enterprise machines with no admin rights.
-    $nodeDir = Join-Path $InstallDir "node"
+    $nodeDir = Join-Path $PortableRoot "node"
     Write-Info "Downloading portable Node.js $NodeVersion to $nodeDir\ ..."
     Write-Info "(no admin rights required; isolated from any system Node install)"
     try {
         $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
         # Use npmmirror.com for China-mainland fast download
         if ($NODE_MIRROR_BASE) {
-            $indexUrl = "$NODE_MIRROR_BASE/v${NodeVersion}.x/"
+            $indexUrl = "$NODE_MIRROR_BASE/latest-v${NodeVersion}.x/"
         } else {
             $indexUrl = "https://nodejs.org/dist/latest-v${NodeVersion}.x/"
         }
@@ -736,7 +698,8 @@ function Test-Node {
             $tmpZip = "$env:TEMP\$zipName"
             $tmpDir = "$env:TEMP\hermes-node-extract"
 
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpZip -UseBasicParsing
+            $downloadOk = Invoke-DownloadFile @($downloadUrl, "https://nodejs.org/dist/latest-v${NodeVersion}.x/$zipName") $tmpZip
+            if (-not $downloadOk) { throw "Node.js download failed" }
             if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
             Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
 
@@ -761,39 +724,7 @@ function Test-Node {
         Write-Warn "Portable Node.js download failed: $_"
     }
 
-    # Fallback: try winget (used to be primary, demoted because the MSI
-    # install triggers a UAC prompt that frequently appears minimized in
-    # the taskbar -- looks like a hang to users on stock Windows).
-    # Kept for environments where the portable download fails (proxy,
-    # locked firewall, etc.) but the user is willing to consent to UAC.
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Info "Falling back to winget (may prompt UAC -- check your taskbar for a flashing icon)..."
-        # Capture EAP outside the try block so the catch's restore call always
-        # has a meaningful value (see Install-Uv for the full rationale).
-        $prevEAP = $ErrorActionPreference
-        try {
-            # Relax EAP=Stop so stderr lines from winget don't get wrapped
-            # as ErrorRecords and short-circuit the 2>&1 pipe before we can
-            # check the post-condition.  See the long comment in Install-Uv
-            # for the same pattern.
-            $ErrorActionPreference = "Continue"
-            winget install OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
-            $ErrorActionPreference = $prevEAP
-            # Refresh PATH
-            $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-            if (Get-Command node -ErrorAction SilentlyContinue) {
-                $version = node --version
-                Write-Success "Node.js $version installed via winget"
-                $script:HasNode = $true
-                return $true
-            }
-        } catch {
-            if ($prevEAP) { $ErrorActionPreference = $prevEAP }
-        }
-    }
-
-
-    Write-Info "Install manually: https://nodejs.org/en/download/"
+    Write-Warn "Portable Node.js could not be installed. Browser tools may be unavailable."
     $script:HasNode = $false
     return $true
 }
@@ -801,119 +732,72 @@ function Test-Node {
 function Install-SystemPackages {
     $script:HasRipgrep = $false
     $script:HasFfmpeg = $false
-    $needRipgrep = $false
-    $needFfmpeg = $false
 
     Write-Info "Checking ripgrep (fast file search)..."
-    if (Get-Command rg -ErrorAction SilentlyContinue) {
-        $version = rg --version | Select-Object -First 1
-        Write-Success "$version found"
+    $rgExe = Join-Path $PortableRoot "bin\rg.exe"
+    if (Test-Path $rgExe) {
+        $version = & $rgExe --version | Select-Object -First 1
+        Write-Success "$version found (portable)"
         $script:HasRipgrep = $true
     } else {
-        $needRipgrep = $true
+        try {
+            $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") { "aarch64" } else { "x86_64" }
+            $rgVersion = "14.1.1"
+            $rgZipName = "ripgrep-$rgVersion-$arch-pc-windows-msvc.zip"
+            $rgZip = Join-Path $PortableRoot "tmp\$rgZipName"
+            $rgExtract = Join-Path $PortableRoot "tmp\rg-extract"
+            if (Test-Path $rgExtract) { Remove-Item -Recurse -Force $rgExtract -ErrorAction SilentlyContinue }
+            $rgOk = Invoke-DownloadFile @(
+                (Get-ProxiedUrl "https://github.com/BurntSushi/ripgrep/releases/download/$rgVersion/$rgZipName"),
+                "https://github.com/BurntSushi/ripgrep/releases/download/$rgVersion/$rgZipName"
+            ) $rgZip
+            if (-not $rgOk) { throw "ripgrep download failed" }
+            Expand-Archive -Path $rgZip -DestinationPath $rgExtract -Force
+            $downloadedRg = Get-ChildItem $rgExtract -Recurse -Filter rg.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $downloadedRg) { throw "rg.exe not found in archive" }
+            Copy-Item $downloadedRg.FullName $rgExe -Force
+            Remove-Item -Force $rgZip -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force $rgExtract -ErrorAction SilentlyContinue
+            $script:HasRipgrep = $true
+            Write-Success "ripgrep installed to $rgExe"
+        } catch {
+            Write-Warn "ripgrep portable install failed: $_"
+        }
     }
 
     Write-Info "Checking ffmpeg (TTS voice messages)..."
-    if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
-        Write-Success "ffmpeg found"
+    $ffmpegExe = Join-Path $PortableRoot "bin\ffmpeg.exe"
+    if (Test-Path $ffmpegExe) {
+        Write-Success "ffmpeg found (portable)"
         $script:HasFfmpeg = $true
     } else {
-        $needFfmpeg = $true
-    }
-
-    if (-not $needRipgrep -and -not $needFfmpeg) { return }
-
-    # Build description and package lists for each package manager
-    $descParts = @()
-    $wingetPkgs = @()
-    $chocoPkgs = @()
-    $scoopPkgs = @()
-
-    if ($needRipgrep) {
-        $descParts += "ripgrep for faster file search"
-        $wingetPkgs += "BurntSushi.ripgrep.MSVC"
-        $chocoPkgs += "ripgrep"
-        $scoopPkgs += "ripgrep"
-    }
-    if ($needFfmpeg) {
-        $descParts += "ffmpeg for TTS voice messages"
-        $wingetPkgs += "Gyan.FFmpeg"
-        $chocoPkgs += "ffmpeg"
-        $scoopPkgs += "ffmpeg"
-    }
-
-    $description = $descParts -join " and "
-    $hasWinget = Get-Command winget -ErrorAction SilentlyContinue
-    $hasChoco = Get-Command choco -ErrorAction SilentlyContinue
-    $hasScoop = Get-Command scoop -ErrorAction SilentlyContinue
-
-    # Try winget first (most common on modern Windows)
-    if ($hasWinget) {
-        Write-Info "Installing $description via winget..."
-        foreach ($pkg in $wingetPkgs) {
-            try {
-                winget install $pkg --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
-            } catch { }
-        }
-        # Refresh PATH and recheck
-        $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-        if ($needRipgrep -and (Get-Command rg -ErrorAction SilentlyContinue)) {
-            Write-Success "ripgrep installed"
-            $script:HasRipgrep = $true
-            $needRipgrep = $false
-        }
-        if ($needFfmpeg -and (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            Write-Success "ffmpeg installed"
+        try {
+            if (-not [Environment]::Is64BitOperatingSystem) {
+                throw "32-bit Windows is not supported by the bundled ffmpeg package"
+            }
+            $ffZipName = "ffmpeg-master-latest-win64-gpl.zip"
+            $ffZip = Join-Path $PortableRoot "tmp\$ffZipName"
+            $ffExtract = Join-Path $PortableRoot "tmp\ffmpeg-extract"
+            if (Test-Path $ffExtract) { Remove-Item -Recurse -Force $ffExtract -ErrorAction SilentlyContinue }
+            $ffOk = Invoke-DownloadFile @(
+                (Get-ProxiedUrl "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$ffZipName"),
+                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$ffZipName",
+                "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+            ) $ffZip
+            if (-not $ffOk) { throw "ffmpeg download failed" }
+            Expand-Archive -Path $ffZip -DestinationPath $ffExtract -Force
+            $downloadedFfmpeg = Get-ChildItem $ffExtract -Recurse -Filter ffmpeg.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $downloadedFfmpeg) { throw "ffmpeg.exe not found in archive" }
+            Copy-Item $downloadedFfmpeg.FullName $ffmpegExe -Force
+            $downloadedFfprobe = Get-ChildItem $ffExtract -Recurse -Filter ffprobe.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($downloadedFfprobe) { Copy-Item $downloadedFfprobe.FullName (Join-Path $PortableRoot "bin\ffprobe.exe") -Force }
+            Remove-Item -Force $ffZip -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force $ffExtract -ErrorAction SilentlyContinue
             $script:HasFfmpeg = $true
-            $needFfmpeg = $false
+            Write-Success "ffmpeg installed to $ffmpegExe"
+        } catch {
+            Write-Warn "ffmpeg portable install failed: $_"
         }
-        if (-not $needRipgrep -and -not $needFfmpeg) { return }
-    }
-
-    # Fallback: choco
-    if ($hasChoco -and ($needRipgrep -or $needFfmpeg)) {
-        Write-Info "Trying Chocolatey..."
-        foreach ($pkg in $chocoPkgs) {
-            try { choco install $pkg -y 2>&1 | Out-Null } catch { }
-        }
-        if ($needRipgrep -and (Get-Command rg -ErrorAction SilentlyContinue)) {
-            Write-Success "ripgrep installed via chocolatey"
-            $script:HasRipgrep = $true
-            $needRipgrep = $false
-        }
-        if ($needFfmpeg -and (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            Write-Success "ffmpeg installed via chocolatey"
-            $script:HasFfmpeg = $true
-            $needFfmpeg = $false
-        }
-    }
-
-    # Fallback: scoop
-    if ($hasScoop -and ($needRipgrep -or $needFfmpeg)) {
-        Write-Info "Trying Scoop..."
-        foreach ($pkg in $scoopPkgs) {
-            try { scoop install $pkg 2>&1 | Out-Null } catch { }
-        }
-        if ($needRipgrep -and (Get-Command rg -ErrorAction SilentlyContinue)) {
-            Write-Success "ripgrep installed via scoop"
-            $script:HasRipgrep = $true
-            $needRipgrep = $false
-        }
-        if ($needFfmpeg -and (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            Write-Success "ffmpeg installed via scoop"
-            $script:HasFfmpeg = $true
-            $needFfmpeg = $false
-        }
-    }
-
-    # Show manual instructions for anything still missing
-    if ($needRipgrep) {
-        Write-Warn "ripgrep not installed (file search will use findstr fallback)"
-        Write-Info "  winget install BurntSushi.ripgrep.MSVC"
-    }
-    if ($needFfmpeg) {
-        Write-Warn "ffmpeg not installed (TTS voice messages will be limited)"
-        Write-Info "  winget install Gyan.FFmpeg"
     }
 }
 
@@ -1014,31 +898,28 @@ function Install-Repository {
 
         # Fix Windows git "copy-fd: write returned: Invalid argument" error.
         Write-Info "Configuring git for Windows compatibility..."
-        $env:GIT_CONFIG_COUNT = "1"
+        $env:GIT_CONFIG_COUNT = if ($GIT_MIRROR_PREFIX) { "2" } else { "1" }
         $env:GIT_CONFIG_KEY_0 = "windows.appendAtomically"
         $env:GIT_CONFIG_VALUE_0 = "false"
-        git config --global windows.appendAtomically false 2>$null
-
-        # Try SSH first, then HTTPS via proxy/mirror, then plain HTTPS
-        Write-Info "Trying SSH clone..."
-        $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=5"
+        if ($GIT_MIRROR_PREFIX) {
+            $githubProxyBase = Get-ProxiedUrl "https://github.com/"
+            $env:GIT_CONFIG_KEY_1 = "url.${githubProxyBase}.insteadOf"
+            $env:GIT_CONFIG_VALUE_1 = "https://github.com/"
+        }
+        # Try China-friendly HTTPS proxy/mirror first, then plain HTTPS. SSH is
+        # intentionally skipped because it commonly fails on fresh machines and
+        # is not friendly to mainland networks.
+        if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
+        Write-Info "Trying HTTPS clone via mirror/proxy..."
         try {
-            git -c windows.appendAtomically=false clone --branch $Branch --recurse-submodules $RepoUrlSsh $InstallDir
+            git -c windows.appendAtomically=false clone --branch $Branch --recurse-submodules $RepoUrlHttpsProxy $InstallDir
             if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true }
         } catch { }
-        $env:GIT_SSH_COMMAND = $null
 
         if (-not $cloneSuccess) {
-            # Save portable git session PATH before wipe (absolute paths)
-            $savedGitBin = $null
-            if (Test-Path "$InstallDir\git\cmd\git.exe") {
-                $savedGitBin = "$InstallDir\git\cmd;$InstallDir\git\bin;$InstallDir\git\usr\bin"
-            }
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
-            Write-Info "SSH failed, trying HTTPS..."
+            Write-Info "Mirror clone failed, trying direct HTTPS..."
             try {
-                # Re-add portable git to session PATH after directory wipe
-                if ($savedGitBin) { $env:Path = "$savedGitBin;$env:Path" }
                 git -c windows.appendAtomically=false clone --branch $Branch --recurse-submodules $RepoUrlHttps $InstallDir
                 if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true }
             } catch { }
@@ -1065,7 +946,8 @@ function Install-Repository {
                 $zipPath = "$env:TEMP\hermes-agent-$zipLabel.zip"
                 $extractPath = "$env:TEMP\hermes-agent-extract"
 
-                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+                $zipOk = Invoke-DownloadFile @((Get-ProxiedUrl $zipUrl), $zipUrl) $zipPath
+                if (-not $zipOk) { throw "ZIP download failed" }
                 if (Test-Path $extractPath) { Remove-Item -Recurse -Force $extractPath }
                 Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
 
@@ -1080,7 +962,7 @@ function Install-Repository {
                     Push-Location $InstallDir
                     git -c windows.appendAtomically=false init 2>$null
                     git -c windows.appendAtomically=false config windows.appendAtomically false 2>$null
-                    git remote add origin $RepoUrlHttps 2>$null
+                    git remote add origin $RepoUrlHttpsProxy 2>$null
                     Pop-Location
                     Write-Success "Git repo initialized for future updates"
 
@@ -1096,13 +978,17 @@ function Install-Repository {
         }
 
         if (-not $cloneSuccess) {
-            throw "Failed to download repository (tried git clone SSH, HTTPS, and ZIP)"
+            throw "Failed to download repository (tried HTTPS mirror/proxy, direct HTTPS, and ZIP)"
         }
     }
 
     # Set per-repo config (harmless if it fails)
     Push-Location $InstallDir
     git -c windows.appendAtomically=false config windows.appendAtomically false 2>$null
+    if ($GIT_MIRROR_PREFIX) {
+        $githubProxyBase = Get-ProxiedUrl "https://github.com/"
+        git -c windows.appendAtomically=false config "url.${githubProxyBase}.insteadOf" "https://github.com/" 2>$null
+    }
 
     # Post-clone pin: when a clone (or ZIP-fallback init) just landed us on
     # $Branch's tip, honour the higher-precedence $Commit / $Tag by checking
@@ -1163,8 +1049,10 @@ function Install-Venv {
         Remove-Item -Recurse -Force "venv"
     }
     
-    # uv creates the venv and pins the Python version in one step
-    & $UvCmd venv venv --python $PythonVersion
+    # uv creates the venv from the portable Python, not from the system.
+    $pythonForVenv = if ($script:PythonCmd) { $script:PythonCmd } else { Find-PortablePython }
+    if (-not $pythonForVenv) { throw "portable Python not found under $PortableRoot\uv-python" }
+    & $UvCmd venv venv --python $pythonForVenv
     
     Pop-Location
     
@@ -1370,7 +1258,7 @@ except Exception:
 
 function Set-PathVariable {
     Write-Info "Skipping system PATH modification (portable mode)..."
-    Write-Info "Use hermes启动.bat to launch Hermes from the install directory."
+    Write-Info "Use $PortableRoot\hermes启动.bat to launch Hermes from the portable directory."
     
     # Set HERMES_HOME so the Python code finds config/data in the right place.
     # This is the only env var we set, and it's scoped to this session.
@@ -1549,7 +1437,7 @@ function Install-NodeDeps {
             # for uv's stderr-emitting installer.  Check success via
             # $LASTEXITCODE, which is reliable regardless of stderr noise.
             $ErrorActionPreference = "Continue"
-            & $npmPath install --silent 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $logPath
+            & $npmPath install --registry $NPM_REGISTRY --silent 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $logPath
             $code = $LASTEXITCODE
             $ErrorActionPreference = $prevEAP
             if ($code -eq 0) {
@@ -1588,7 +1476,7 @@ function Install-NodeDeps {
 
         # Install Playwright Chromium (mirrors scripts/install.sh behaviour for
         # Linux).  Without this, tools/browser_tool.py::check_browser_requirements
-        # returns False (no Chromium under %LOCALAPPDATA%\ms-playwright), and the
+        # returns False without a Playwright-managed Chromium, and the
         # browser_* tools are silently filtered out of the agent's tool schema.
         # System Chrome at "C:\Program Files\Google\Chrome\..." is NOT used by
         # agent-browser -- it expects a Playwright-managed Chromium.
@@ -1650,6 +1538,7 @@ function Install-NodeDeps {
                     # the user sees clean playwright output instead of the
                     # alarming-looking error formatting.
                     $ErrorActionPreference = "Continue"
+                    $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $PortableRoot "ms-playwright"
                     & $npxExe --yes playwright install chromium 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $pwLog
                     $pwCode = $LASTEXITCODE
                     $ErrorActionPreference = $prevEAP
@@ -1844,9 +1733,11 @@ function Start-GatewayIfConfigured {
 
     if (-not $hasMessaging) { return }
 
-    $hermesCmd = "$InstallDir\venv\Scripts\hermes.exe"
+    $hermesCmd = "$InstallDir\venv\Scripts\python.exe"
+    $hermesGatewayArgs = "-m hermes_cli.main gateway"
     if (-not (Test-Path $hermesCmd)) {
-        $hermesCmd = "hermes"
+        $hermesCmd = "$InstallDir\venv\Scripts\hermes.exe"
+        $hermesGatewayArgs = "gateway"
     }
 
     # If WhatsApp is enabled but not yet paired, run foreground for QR scan
@@ -1864,7 +1755,11 @@ function Start-GatewayIfConfigured {
             $response = Read-Host "Pair WhatsApp now? [Y/n]"
             if ($response -eq "" -or $response -match "^[Yy]") {
                 try {
-                    & $hermesCmd whatsapp
+                    if ($hermesCmd -like "*python.exe") {
+                        & $hermesCmd -m hermes_cli.main whatsapp
+                    } else {
+                        & $hermesCmd whatsapp
+                    }
                 } catch {
                     # Expected after pairing completes
                 }
@@ -1894,7 +1789,7 @@ function Start-GatewayIfConfigured {
         Write-Info "Starting gateway in background..."
         try {
             $logFile = "$HermesHome\logs\gateway.log"
-            Start-Process -FilePath $hermesCmd -ArgumentList "gateway" `
+            Start-Process -FilePath $hermesCmd -ArgumentList $hermesGatewayArgs `
                 -RedirectStandardOutput $logFile `
                 -RedirectStandardError "$HermesHome\logs\gateway-error.log" `
                 -WindowStyle Hidden
@@ -1914,18 +1809,51 @@ function Start-GatewayIfConfigured {
 # ============================================================================
 
 function New-StartBat {
-    $batPath = Join-Path $InstallDir "hermes启动.bat"
+    $batPath = Join-Path $PortableRoot "hermes启动.bat"
     $content = @"
 @echo off
 chcp 65001 >nul 2>&1
+setlocal EnableExtensions EnableDelayedExpansion
 title Hermes Agent
-cd /d "%~dp0"
-if exist "venv\Scripts\hermes.exe" (
-    call venv\Scripts\hermes.exe %*
-) else if exist "venv\bin\hermes.exe" (
-    call venv\bin\hermes.exe %*
+set "HERMES_ROOT=%~dp0"
+set "HERMES_HOME=%HERMES_ROOT%.hermes"
+set "HERMES_AGENT_DIR=%HERMES_ROOT%hermes-agent"
+set "HERMES_GIT_BASH_PATH=%HERMES_ROOT%git\bin\bash.exe"
+set "PLAYWRIGHT_BROWSERS_PATH=%HERMES_ROOT%ms-playwright"
+set "NPM_CONFIG_PREFIX=%HERMES_ROOT%npm-global"
+set "NPM_CONFIG_CACHE=%HERMES_ROOT%cache\npm"
+set "NPM_CONFIG_REGISTRY=$NPM_REGISTRY"
+set "UV_INSTALL_DIR=%HERMES_ROOT%uv"
+set "UV_PYTHON_INSTALL_DIR=%HERMES_ROOT%uv-python"
+set "UV_PYTHON_CACHE_DIR=%HERMES_ROOT%cache\uv\python"
+set "UV_CACHE_DIR=%HERMES_ROOT%cache\uv"
+set "UV_PYTHON_PREFERENCE=only-managed"
+set "UV_PYTHON_NO_REGISTRY=1"
+set "UV_DEFAULT_INDEX=$PYPI_INDEX"
+set "UV_INDEX_URL=$PYPI_INDEX"
+set "PIP_INDEX_URL=$PYPI_INDEX"
+set "UV_PYTHON_INSTALL_MIRROR=$(Get-ProxiedUrl "https://github.com/astral-sh/python-build-standalone/releases/download")"
+set "HERMES_GITHUB_PROXY=$GIT_MIRROR_PREFIX"
+set "GIT_CONFIG_COUNT=1"
+set "GIT_CONFIG_KEY_0=url.$(Get-ProxiedUrl "https://github.com/").insteadOf"
+set "GIT_CONFIG_VALUE_0=https://github.com/"
+set "PYTHONNOUSERSITE=1"
+set "PATH=%HERMES_ROOT%;%HERMES_ROOT%bin;%HERMES_ROOT%node;%HERMES_ROOT%npm-global;%HERMES_ROOT%git\cmd;%HERMES_ROOT%git\bin;%HERMES_ROOT%git\usr\bin;%HERMES_ROOT%uv;%HERMES_AGENT_DIR%\venv\Scripts;%PATH%"
+
+set "HERMES_CURRENT_ROOT=%HERMES_ROOT:~0,-1%"
+if exist "%HERMES_ROOT%install-root.txt" (
+    set /p HERMES_OLD_ROOT=<"%HERMES_ROOT%install-root.txt"
+    if /I not "!HERMES_OLD_ROOT!"=="%HERMES_CURRENT_ROOT%" (
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%HERMES_ROOT%hermes修复路径.ps1" -Root "%HERMES_CURRENT_ROOT%" -OldRoot "!HERMES_OLD_ROOT!"
+    )
+)
+
+cd /d "%HERMES_AGENT_DIR%"
+if exist "venv\Scripts\python.exe" (
+    set "PYTHONPATH=%HERMES_AGENT_DIR%;%PYTHONPATH%"
+    call venv\Scripts\python.exe -m hermes_cli.main %*
 ) else (
-    echo Error: hermes.exe not found. Please reinstall.
+    echo Error: venv\Scripts\python.exe not found. Please reinstall.
     pause
 )
 "@
@@ -1935,22 +1863,27 @@ if exist "venv\Scripts\hermes.exe" (
 }
 
 function New-StopBat {
-    $batPath = Join-Path $InstallDir "hermes停止.bat"
+    $batPath = Join-Path $PortableRoot "hermes停止.bat"
     $content = @"
 @echo off
 chcp 65001 >nul 2>&1
+setlocal EnableExtensions
 title Stopping Hermes Agent
-cd /d "%~dp0"
+set "HERMES_ROOT=%~dp0"
+set "HERMES_HOME=%HERMES_ROOT%.hermes"
+set "HERMES_AGENT_DIR=%HERMES_ROOT%hermes-agent"
+cd /d "%HERMES_AGENT_DIR%"
 
 echo Searching for Hermes process...
 for /f "tokens=2" %%a in ('tasklist /FI "IMAGENAME eq hermes.exe" /fo list ^| find "PID:"') do (
     echo Stopping Hermes process PID: %%a
     taskkill /F /PID %%a >nul 2>&1
-    echo Hermes process stopped.
-    goto :done
 )
 
-echo Hermes process not found (may already be stopped).
+echo Searching for Hermes Python process...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { `$_.CommandLine -like '*hermes_cli.main*' -and `$_.CommandLine -like '*hermes-agent*' } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue; Write-Host ('Stopped PID: ' + `$_.ProcessId) }"
+
+echo Done. Hermes may already have been stopped if no PID was shown.
 :done
 pause
 "@
@@ -1960,33 +1893,85 @@ pause
 }
 
 function New-UpdateBat {
-    $batPath = Join-Path $InstallDir "hermes更新.bat"
+    $batPath = Join-Path $PortableRoot "hermes更新.bat"
     $content = @"
 @echo off
 chcp 65001 >nul 2>&1
+setlocal EnableExtensions EnableDelayedExpansion
 title Hermes Agent Update
-cd /d "%~dp0"
+set "HERMES_ROOT=%~dp0"
+set "HERMES_HOME=%HERMES_ROOT%.hermes"
+set "HERMES_AGENT_DIR=%HERMES_ROOT%hermes-agent"
+set "HERMES_GIT_BASH_PATH=%HERMES_ROOT%git\bin\bash.exe"
+set "PLAYWRIGHT_BROWSERS_PATH=%HERMES_ROOT%ms-playwright"
+set "NPM_CONFIG_PREFIX=%HERMES_ROOT%npm-global"
+set "NPM_CONFIG_CACHE=%HERMES_ROOT%cache\npm"
+set "NPM_CONFIG_REGISTRY=$NPM_REGISTRY"
+set "UV_INSTALL_DIR=%HERMES_ROOT%uv"
+set "UV_PYTHON_INSTALL_DIR=%HERMES_ROOT%uv-python"
+set "UV_PYTHON_CACHE_DIR=%HERMES_ROOT%cache\uv\python"
+set "UV_CACHE_DIR=%HERMES_ROOT%cache\uv"
+set "UV_PYTHON_PREFERENCE=only-managed"
+set "UV_PYTHON_NO_REGISTRY=1"
+set "UV_DEFAULT_INDEX=$PYPI_INDEX"
+set "UV_INDEX_URL=$PYPI_INDEX"
+set "PIP_INDEX_URL=$PYPI_INDEX"
+set "UV_PYTHON_INSTALL_MIRROR=$(Get-ProxiedUrl "https://github.com/astral-sh/python-build-standalone/releases/download")"
+set "HERMES_GITHUB_PROXY=$GIT_MIRROR_PREFIX"
+set "GIT_CONFIG_COUNT=1"
+set "GIT_CONFIG_KEY_0=url.$(Get-ProxiedUrl "https://github.com/").insteadOf"
+set "GIT_CONFIG_VALUE_0=https://github.com/"
+set "PYTHONNOUSERSITE=1"
+set "PATH=%HERMES_ROOT%;%HERMES_ROOT%bin;%HERMES_ROOT%node;%HERMES_ROOT%npm-global;%HERMES_ROOT%git\cmd;%HERMES_ROOT%git\bin;%HERMES_ROOT%git\usr\bin;%HERMES_ROOT%uv;%HERMES_AGENT_DIR%\venv\Scripts;%PATH%"
+
+set "HERMES_CURRENT_ROOT=%HERMES_ROOT:~0,-1%"
+if exist "%HERMES_ROOT%install-root.txt" (
+    set /p HERMES_OLD_ROOT=<"%HERMES_ROOT%install-root.txt"
+    if /I not "!HERMES_OLD_ROOT!"=="%HERMES_CURRENT_ROOT%" (
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%HERMES_ROOT%hermes修复路径.ps1" -Root "%HERMES_CURRENT_ROOT%" -OldRoot "!HERMES_OLD_ROOT!"
+    )
+)
+
+cd /d "%HERMES_AGENT_DIR%"
 
 echo ============================================
 echo   Hermes Agent Update
 echo ============================================
 echo.
 
-if exist "git\cmd\git.exe" (
-    echo Using bundled Git...
-    set PATH=%~dp0git\cmd;%~dp0git\bin;%~dp0git\usr\bin;%PATH%
-) else if exist "git\bin\bash.exe" (
-    set PATH=%~dp0git\cmd;%~dp0git\bin;%~dp0git\usr\bin;%PATH%
+if not exist "%HERMES_ROOT%git\cmd\git.exe" (
+    echo Error: bundled Git not found. Please reinstall.
+    pause
+    exit /b 1
 )
 
-if exist "venv\Scripts\python.exe" (
-    echo Checking for updates...
-    cd /d "%~dp0"
-    "venv\Scripts\python.exe" -m hermes_cli.main update
-) else (
+if not exist "venv\Scripts\python.exe" (
     echo Error: venv not found. Please reinstall.
     pause
     exit /b 1
+)
+
+echo Stopping running Hermes processes...
+for /f "tokens=2" %%a in ('tasklist /FI "IMAGENAME eq hermes.exe" /fo list ^| find "PID:"') do taskkill /F /PID %%a >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { `$_.CommandLine -like '*hermes_cli.main*' -and `$_.CommandLine -like '*hermes-agent*' } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }"
+
+echo Fetching latest Hermes source...
+"%HERMES_ROOT%git\cmd\git.exe" -c windows.appendAtomically=false fetch origin
+if errorlevel 1 goto update_failed
+"%HERMES_ROOT%git\cmd\git.exe" -c windows.appendAtomically=false pull --ff-only origin $Branch
+if errorlevel 1 goto update_failed
+
+echo Updating Python dependencies...
+if exist "uv.lock" (
+    "%HERMES_ROOT%uv\uv.exe" sync --extra all --locked
+) else (
+    "%HERMES_ROOT%uv\uv.exe" pip install -e ".[all]"
+)
+if errorlevel 1 goto update_failed
+
+if exist "package.json" if exist "%HERMES_ROOT%node\npm.cmd" (
+    echo Updating Node dependencies...
+    "%HERMES_ROOT%node\npm.cmd" install --registry $NPM_REGISTRY --silent
 )
 
 echo.
@@ -1994,10 +1979,63 @@ echo ============================================
 echo   Update complete!
 echo ============================================
 pause
+exit /b 0
+
+:update_failed
+echo.
+echo Update failed. Please check the messages above.
+pause
+exit /b 1
 "@
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
     Write-Success "Created hermes更新.bat"
+}
+
+function New-RelocateScript {
+    $scriptPath = Join-Path $PortableRoot "hermes修复路径.ps1"
+    $content = @'
+param(
+    [string]$Root = (Split-Path -Parent $PSCommandPath),
+    [string]$OldRoot = ""
+)
+
+$ErrorActionPreference = "Stop"
+$Root = [IO.Path]::GetFullPath($Root).TrimEnd("\")
+if (-not $OldRoot) {
+    $marker = Join-Path $Root "install-root.txt"
+    $OldRoot = if (Test-Path $marker) { (Get-Content $marker -Raw).Trim() } else { $Root }
+}
+$OldRoot = [IO.Path]::GetFullPath($OldRoot).TrimEnd("\")
+
+if ($OldRoot -ieq $Root) {
+    Set-Content -Path (Join-Path $Root "install-root.txt") -Value $Root -Encoding ASCII
+    exit 0
+}
+
+Write-Host "Relocating Hermes paths: $OldRoot -> $Root"
+
+function Replace-TextPath($file) {
+    $exts = @(".cmd", ".bat", ".ps1", ".psm1", ".py", ".pth", ".cfg", ".ini", ".json", ".yaml", ".yml", ".toml", ".txt")
+    $names = @(".env", "install-root.txt")
+    if (($exts -notcontains $file.Extension.ToLowerInvariant()) -and ($names -notcontains $file.Name.ToLowerInvariant())) { return }
+    try {
+        $s = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop
+        $n = $s.Replace($OldRoot, $Root)
+        if ($n -ne $s) {
+            Set-Content -LiteralPath $file.FullName -Value $n -Encoding UTF8
+        }
+    } catch {}
+}
+
+Get-ChildItem -LiteralPath $Root -Recurse -Force -File | ForEach-Object { Replace-TextPath $_ }
+Set-Content -Path (Join-Path $Root "install-root.txt") -Value $Root -Encoding ASCII
+Write-Host "Relocate done."
+'@
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($scriptPath, $content, $utf8NoBom)
+    [System.IO.File]::WriteAllText((Join-Path $PortableRoot "install-root.txt"), $PortableRoot, [System.Text.Encoding]::ASCII)
+    Write-Success "Created hermes修复路径.ps1"
 }
 
 function Write-Completion {
@@ -2011,10 +2049,12 @@ function Write-Completion {
     New-StartBat
     New-StopBat
     New-UpdateBat
+    New-RelocateScript
     
     Write-Host ""
     Write-Host "* Installation directory:" -ForegroundColor Cyan
-    Write-Host "  $InstallDir" -ForegroundColor Yellow
+    Write-Host "  $PortableRoot" -ForegroundColor Yellow
+    Write-Host "  Source: $InstallDir" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "* Double-click to run:" -ForegroundColor Cyan
     Write-Host "  hermes启动.bat        " -NoNewline -ForegroundColor Green
@@ -2028,11 +2068,11 @@ function Write-Completion {
     Write-Host "  $HermesHome" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "* Manual commands (restart terminal first):" -ForegroundColor Cyan
-    Write-Host "  hermes              " -NoNewline -ForegroundColor Green
+    Write-Host "  .\hermes启动.bat        " -NoNewline -ForegroundColor Green
     Write-Host "Start chatting"
-    Write-Host "  hermes setup        " -NoNewline -ForegroundColor Green
+    Write-Host "  .\hermes启动.bat setup  " -NoNewline -ForegroundColor Green
     Write-Host "Configure API keys & settings"
-    Write-Host "  hermes gateway      " -NoNewline -ForegroundColor Green
+    Write-Host "  .\hermes启动.bat gateway" -NoNewline -ForegroundColor Green
     Write-Host "Start messaging gateway"
     Write-Host ""
     
@@ -2044,8 +2084,7 @@ function Write-Completion {
     }
     
     if (-not $HasRipgrep) {
-        Write-Host "Note: ripgrep (rg) was not installed. For faster file search:" -ForegroundColor Yellow
-        Write-Host "  winget install BurntSushi.ripgrep.MSVC" -ForegroundColor Yellow
+        Write-Host "Note: portable ripgrep (rg) was not installed. File search will be slower." -ForegroundColor Yellow
         Write-Host ""
     }
 }
@@ -2296,10 +2335,10 @@ function Invoke-EnsureMode {
                 }
             }
             "ripgrep" {
-                Write-Info "ripgrep: install manually on Windows (scoop install ripgrep)"
+                Install-SystemPackages
             }
             "ffmpeg" {
-                Write-Info "ffmpeg: install manually on Windows (scoop install ffmpeg)"
+                Install-SystemPackages
             }
             default {
                 Write-Err "Unknown dependency: $dep"
@@ -2316,6 +2355,7 @@ function Invoke-PostInstallMode {
 }
 
 function Main {
+    Set-PortableSessionEnv
     Write-Banner
     Invoke-AllStages
     if (-not $Json) {
@@ -2334,6 +2374,8 @@ function Main {
 # structured JSON error frame instead of a bare exception.
 
 try {
+    Set-PortableSessionEnv
+
     if ($Ensure -ne "") {
         if ($PSBoundParameters.ContainsKey("Stage")) {
             Write-Err "Cannot use -Ensure and -Stage simultaneously"
