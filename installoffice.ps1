@@ -2088,6 +2088,13 @@ Write-Host "Relocate done."
     Write-Success "Created hermes修复路径.ps1"
 }
 
+function New-PortableLaunchers {
+    New-StartBat
+    New-StopBat
+    New-UpdateBat
+    New-RelocateScript
+}
+
 function Write-Completion {
     Write-Host ""
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Green
@@ -2096,10 +2103,7 @@ function Write-Completion {
     Write-Host ""
     
     # Generate portable batch files
-    New-StartBat
-    New-StopBat
-    New-UpdateBat
-    New-RelocateScript
+    New-PortableLaunchers
     
     Write-Host ""
     Write-Host "* Installation directory:" -ForegroundColor Cyan
@@ -2225,6 +2229,7 @@ $InstallStages = @(
     @{ Name = "path";             Title = "Adding Hermes to PATH";                Category = "finalize";     NeedsUserInput = $false; Worker = "Stage-Path" }
     @{ Name = "config-templates"; Title = "Writing configuration templates";      Category = "finalize";     NeedsUserInput = $false; Worker = "Stage-ConfigTemplates" }
     @{ Name = "platform-sdks";    Title = "Installing messaging platform SDKs";   Category = "finalize";     NeedsUserInput = $false; Worker = "Stage-PlatformSdks" }
+    @{ Name = "launchers";        Title = "Writing portable launchers";           Category = "finalize";     NeedsUserInput = $false; Worker = "Stage-Launchers" }
     # Interactive stages.  In non-interactive mode these become no-ops; the
     # caller (GUI / CI) handles the equivalent UX themselves.
     @{ Name = "configure";        Title = "Configuring API keys and models";      Category = "post-install"; NeedsUserInput = $true;  Worker = "Stage-Configure" }
@@ -2264,6 +2269,7 @@ function Stage-NodeDeps         { Install-NodeDeps }
 function Stage-Path             { Set-PathVariable }
 function Stage-ConfigTemplates  { Copy-ConfigTemplates }
 function Stage-PlatformSdks     { Resolve-UvCmd; Install-PlatformSdks }
+function Stage-Launchers        { New-PortableLaunchers }
 function Stage-Configure        { Invoke-SetupWizard }
 function Stage-Gateway          { Start-GatewayIfConfigured }
 
