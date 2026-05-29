@@ -1933,11 +1933,18 @@ if errorlevel 1 (
 )
 
 set "PYTHONPATH=%HERMES_AGENT_DIR%;%PYTHONPATH%"
-call venv\Scripts\python.exe -m hermes_cli.main %*
-set "HERMES_EXIT=%ERRORLEVEL%"
-
 echo.
-echo Hermes exited with code %HERMES_EXIT%.
+echo Hermes portable environment is ready.
+echo.
+echo Examples:
+echo   hermes
+echo   hermes version
+echo   hermes model
+echo   hermes setup
+echo   hermes gateway
+echo.
+cd /d "%HERMES_ROOT%"
+%COMSPEC% /k
 
 :finish
 echo.
@@ -1947,36 +1954,6 @@ pause >nul
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
     Write-Success "Created hermes-start.bat"
-}
-
-function New-StopBat {
-    $batPath = Join-Path $PortableRoot "hermes-stop.bat"
-    $content = @"
-@echo off
-chcp 65001 >nul 2>&1
-setlocal EnableExtensions
-title Stopping Hermes Agent
-set "HERMES_ROOT=%~dp0"
-set "HERMES_HOME=%HERMES_ROOT%.hermes"
-set "HERMES_AGENT_DIR=%HERMES_ROOT%hermes-agent"
-cd /d "%HERMES_AGENT_DIR%"
-
-echo Searching for Hermes process...
-for /f "tokens=2" %%a in ('tasklist /FI "IMAGENAME eq hermes.exe" /fo list ^| find "PID:"') do (
-    echo Stopping Hermes process PID: %%a
-    taskkill /F /PID %%a >nul 2>&1
-)
-
-echo Searching for Hermes Python process...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { `$_.CommandLine -like '*hermes_cli.main*' -and `$_.CommandLine -like '*hermes-agent*' } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue; Write-Host ('Stopped PID: ' + `$_.ProcessId) }"
-
-echo Done. Hermes may already have been stopped if no PID was shown.
-:done
-pause
-"@
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
-    Write-Success "Created hermes-stop.bat"
 }
 
 function New-UpdateBat {
@@ -2372,7 +2349,6 @@ Write-Host "Relocate done."
 
 function New-PortableLaunchers {
     New-StartBat
-    New-StopBat
     New-UpdateBat
     New-WebUiStartBat
     New-WebUiStopBat
@@ -2397,9 +2373,7 @@ function Write-Completion {
     Write-Host ""
     Write-Host "* Double-click to run:" -ForegroundColor Cyan
     Write-Host "  hermes-start.bat     " -NoNewline -ForegroundColor Green
-    Write-Host "Start Hermes"
-    Write-Host "  hermes-stop.bat      " -NoNewline -ForegroundColor Green
-    Write-Host "Stop Hermes"
+    Write-Host "Open Hermes command environment"
     Write-Host "  hermes-update.bat    " -NoNewline -ForegroundColor Green
     Write-Host "Update Hermes"
     Write-Host "  hermes-web-ui-start.bat" -NoNewline -ForegroundColor Green
