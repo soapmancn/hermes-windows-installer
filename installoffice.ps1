@@ -162,7 +162,10 @@ function Initialize-PortableLayout {
         (Join-Path $PortableRoot "bin"),
         (Join-Path $PortableRoot "cache\npm"),
         (Join-Path $PortableRoot "cache\uv"),
+        (Join-Path $PortableRoot "hermes-web-ui-home"),
         (Join-Path $PortableRoot "logs"),
+        (Join-Path $PortableRoot "ms-playwright"),
+        (Join-Path $PortableRoot "npm-global"),
         (Join-Path $PortableRoot "tmp"),
         $HermesHome
     )) {
@@ -178,7 +181,15 @@ function Set-PortableSessionEnv {
     $env:HERMES_ROOT = $PortableRoot
     $env:HERMES_HOME = $HermesHome
     $env:HERMES_AGENT_DIR = $InstallDir
+    $env:HERMES_WEB_UI_HOME = Join-Path $PortableRoot "hermes-web-ui-home"
+    $env:HERMES_WEBUI_HOME = $env:HERMES_WEB_UI_HOME
+    $env:WEB_UI_HOME = $env:HERMES_WEB_UI_HOME
+    $env:HERMES_WEB_HOME = $env:HERMES_WEB_UI_HOME
+    $env:HERMES_BIN = Join-Path $InstallDir "venv\Scripts\hermes.exe"
+    $env:HERMES_EXE = $env:HERMES_BIN
+    $env:HERMES_PY = Join-Path $InstallDir "venv\Scripts\python.exe"
     $env:HERMES_GIT_BASH_PATH = Join-Path $PortableRoot "git\bin\bash.exe"
+    $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $PortableRoot "ms-playwright"
 
     $env:NPM_CONFIG_PREFIX = Join-Path $PortableRoot "npm-global"
     $env:npm_config_prefix = $env:NPM_CONFIG_PREFIX
@@ -1899,13 +1910,39 @@ if exist "%HERMES_ROOT%install-root.txt" (
 )
 
 cd /d "%HERMES_AGENT_DIR%"
-if exist "venv\Scripts\python.exe" (
-    set "PYTHONPATH=%HERMES_AGENT_DIR%;%PYTHONPATH%"
-    call venv\Scripts\python.exe -m hermes_cli.main %*
-) else (
-    echo Error: venv\Scripts\python.exe not found. Please reinstall.
-    pause
+if errorlevel 1 (
+    echo Error: cannot enter Hermes agent directory: %HERMES_AGENT_DIR%
+    goto :finish
 )
+
+if not exist "venv\Scripts\python.exe" (
+    echo Hermes venv is missing. Running repair-venv.bat...
+    call "%HERMES_ROOT%repair-venv.bat" --quiet
+)
+
+venv\Scripts\python.exe --version >nul 2>&1
+if errorlevel 1 (
+    echo Hermes venv is broken. Running repair-venv.bat...
+    call "%HERMES_ROOT%repair-venv.bat" --quiet
+)
+
+venv\Scripts\python.exe --version >nul 2>&1
+if errorlevel 1 (
+    echo Error: venv repair failed.
+    goto :finish
+)
+
+set "PYTHONPATH=%HERMES_AGENT_DIR%;%PYTHONPATH%"
+call venv\Scripts\python.exe -m hermes_cli.main %*
+set "HERMES_EXIT=%ERRORLEVEL%"
+
+echo.
+echo Hermes exited with code %HERMES_EXIT%.
+
+:finish
+echo.
+echo Press any key to close this window...
+pause >nul
 "@
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
@@ -2042,6 +2079,251 @@ exit /b 1
     Write-Success "Created hermes-update.bat"
 }
 
+function New-WebUiStartBat {
+    $batPath = Join-Path $PortableRoot "hermes-web-ui-start.bat"
+    $content = @"
+@echo off
+chcp 65001 >nul 2>&1
+setlocal EnableExtensions EnableDelayedExpansion
+title Hermes Web UI
+
+set "HERMES_ROOT=%~dp0"
+set "HERMES_CURRENT_ROOT=%HERMES_ROOT:~0,-1%"
+
+if exist "%HERMES_ROOT%install-root.txt" (
+    set /p HERMES_OLD_ROOT=<"%HERMES_ROOT%install-root.txt"
+    if /I not "!HERMES_OLD_ROOT!"=="%HERMES_CURRENT_ROOT%" (
+        echo Install path changed. Repairing paths...
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%HERMES_ROOT%hermes-relocate.ps1" -Root "%HERMES_CURRENT_ROOT%" -OldRoot "!HERMES_OLD_ROOT!"
+    )
+)
+
+set "HERMES_HOME=%HERMES_ROOT%.hermes"
+set "HERMES_AGENT_DIR=%HERMES_ROOT%hermes-agent"
+set "HERMES_WEB_UI_HOME=%HERMES_ROOT%hermes-web-ui-home"
+set "HERMES_WEBUI_HOME=%HERMES_WEB_UI_HOME%"
+set "WEB_UI_HOME=%HERMES_WEB_UI_HOME%"
+set "HERMES_WEB_HOME=%HERMES_WEB_UI_HOME%"
+set "HERMES_BIN=%HERMES_AGENT_DIR%\venv\Scripts\hermes.exe"
+set "HERMES_EXE=%HERMES_BIN%"
+set "HERMES_PY=%HERMES_AGENT_DIR%\venv\Scripts\python.exe"
+set "HERMES_GIT_BASH_PATH=%HERMES_ROOT%git\bin\bash.exe"
+set "PLAYWRIGHT_BROWSERS_PATH=%HERMES_ROOT%ms-playwright"
+set "NPM_CONFIG_CACHE=%HERMES_ROOT%cache\npm"
+set "npm_config_cache=%HERMES_ROOT%cache\npm"
+set "NPM_CONFIG_REGISTRY=$NPM_REGISTRY"
+set "npm_config_registry=$NPM_REGISTRY"
+set "UV_CACHE_DIR=%HERMES_ROOT%cache\uv"
+set "PYTHONNOUSERSITE=1"
+set "PATH=%HERMES_ROOT%;%HERMES_ROOT%bin;%HERMES_ROOT%node;%HERMES_ROOT%npm-global;%HERMES_ROOT%git\cmd;%HERMES_ROOT%git\bin;%HERMES_ROOT%git\usr\bin;%HERMES_ROOT%uv;%HERMES_AGENT_DIR%\venv\Scripts;%PATH%"
+
+if not exist "%HERMES_PY%" (
+    echo Hermes venv is missing or broken. Running repair-venv.bat...
+    call "%HERMES_ROOT%repair-venv.bat" --quiet
+)
+
+if not exist "%HERMES_PY%" (
+    echo Error: %HERMES_PY% not found.
+    goto :finish
+)
+
+if not exist "%HERMES_WEB_UI_HOME%" mkdir "%HERMES_WEB_UI_HOME%"
+
+set "WEBUI_CMD=%HERMES_ROOT%node\hermes-web-ui.cmd"
+set "WEBUI_MAIN=%HERMES_ROOT%node\node_modules\hermes-web-ui\bin\hermes-web-ui.mjs"
+if exist "%WEBUI_CMD%" if not exist "%WEBUI_MAIN%" (
+    echo Broken hermes-web-ui install detected. Cleaning...
+    if exist "%HERMES_ROOT%node\node_modules\hermes-web-ui" rmdir /s /q "%HERMES_ROOT%node\node_modules\hermes-web-ui"
+    del /f /q "%WEBUI_CMD%" >nul 2>&1
+)
+
+if not exist "%WEBUI_CMD%" (
+    echo hermes-web-ui not found. Installing to portable Node directory...
+    if not exist "%HERMES_ROOT%node\npm.cmd" (
+        echo Error: npm.cmd not found under %HERMES_ROOT%node.
+        goto :finish
+    )
+    cd /d "%HERMES_ROOT%node"
+    if exist "%HERMES_ROOT%node\node_modules\hermes-web-ui" rmdir /s /q "%HERMES_ROOT%node\node_modules\hermes-web-ui"
+    call "%HERMES_ROOT%node\npm.cmd" install -g --prefix "%HERMES_ROOT%node" hermes-web-ui --registry $NPM_REGISTRY --force
+)
+
+if not exist "%WEBUI_CMD%" (
+    echo Error: hermes-web-ui.cmd was not found after install.
+    goto :finish
+)
+
+if not exist "%WEBUI_MAIN%" (
+    echo Error: hermes-web-ui package is incomplete: %WEBUI_MAIN% not found.
+    goto :finish
+)
+
+cd /d "%HERMES_ROOT%node"
+echo Stopping old Hermes Web UI...
+call "%WEBUI_CMD%" stop
+timeout /t 2 /nobreak >nul
+
+echo Starting Hermes Web UI...
+call "%WEBUI_CMD%"
+set "WEBUI_EXIT=%ERRORLEVEL%"
+
+echo.
+echo Hermes Web UI exited with code %WEBUI_EXIT%.
+
+:finish
+echo.
+echo Press any key to close this window...
+pause >nul
+"@
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
+    Write-Success "Created hermes-web-ui-start.bat"
+}
+
+function New-WebUiStopBat {
+    $batPath = Join-Path $PortableRoot "hermes-web-ui-stop.bat"
+    $content = @"
+@echo off
+chcp 65001 >nul 2>&1
+setlocal EnableExtensions
+title Stop Hermes Web UI
+
+set "HERMES_ROOT=%~dp0"
+set "HERMES_HOME=%HERMES_ROOT%.hermes"
+set "HERMES_AGENT_DIR=%HERMES_ROOT%hermes-agent"
+set "HERMES_WEB_UI_HOME=%HERMES_ROOT%hermes-web-ui-home"
+set "HERMES_BIN=%HERMES_AGENT_DIR%\venv\Scripts\hermes.exe"
+set "PATH=%HERMES_ROOT%;%HERMES_ROOT%bin;%HERMES_ROOT%node;%HERMES_ROOT%npm-global;%HERMES_ROOT%git\cmd;%HERMES_ROOT%git\bin;%HERMES_ROOT%git\usr\bin;%HERMES_ROOT%uv;%HERMES_AGENT_DIR%\venv\Scripts;%PATH%"
+
+if exist "%HERMES_ROOT%node\hermes-web-ui.cmd" (
+    echo Stopping Hermes Web UI...
+    call "%HERMES_ROOT%node\hermes-web-ui.cmd" stop
+)
+
+if exist "%HERMES_BIN%" (
+    echo Stopping Hermes gateway...
+    call "%HERMES_BIN%" gateway stop
+)
+
+call :kill_port 8648
+call :kill_port 8642
+
+echo Done.
+pause
+exit /b 0
+
+:kill_port
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":%~1 .*LISTENING"') do (
+    echo Killing PID %%p on port %~1
+    taskkill /F /PID %%p >nul 2>&1
+)
+exit /b 0
+"@
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
+    Write-Success "Created hermes-web-ui-stop.bat"
+}
+
+function New-RepairVenvBat {
+    $batPath = Join-Path $PortableRoot "repair-venv.bat"
+    $content = @"
+@echo off
+chcp 65001 >nul 2>&1
+setlocal EnableExtensions EnableDelayedExpansion
+title Repair Hermes venv
+
+set "QUIET="
+if /I "%~1"=="--quiet" set "QUIET=1"
+
+set "HERMES_ROOT=%~dp0"
+set "HERMES_CURRENT_ROOT=%HERMES_ROOT:~0,-1%"
+set "HERMES_AGENT_DIR=%HERMES_ROOT%hermes-agent"
+set "UV=%HERMES_ROOT%uv\uv.exe"
+set "PYROOT=%HERMES_ROOT%uv-python"
+
+set "PATH=%HERMES_ROOT%uv;%HERMES_ROOT%bin;%HERMES_ROOT%git\cmd;%HERMES_ROOT%git\bin;%HERMES_ROOT%git\usr\bin;%PATH%"
+set "UV_PYTHON_INSTALL_DIR=%PYROOT%"
+set "UV_PYTHON_CACHE_DIR=%HERMES_ROOT%cache\uv\python"
+set "UV_CACHE_DIR=%HERMES_ROOT%cache\uv"
+set "UV_PYTHON_PREFERENCE=only-managed"
+set "UV_PYTHON_NO_REGISTRY=1"
+set "UV_DEFAULT_INDEX=$PYPI_INDEX"
+set "UV_INDEX_URL=$PYPI_INDEX"
+set "PIP_INDEX_URL=$PYPI_INDEX"
+set "UV_PYTHON_INSTALL_MIRROR=$(Get-ProxiedUrl "https://github.com/astral-sh/python-build-standalone/releases/download")"
+
+if exist "%HERMES_ROOT%install-root.txt" (
+    set /p HERMES_OLD_ROOT=<"%HERMES_ROOT%install-root.txt"
+    if /I not "!HERMES_OLD_ROOT!"=="%HERMES_CURRENT_ROOT%" (
+        echo Install path changed. Repairing text paths...
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%HERMES_ROOT%hermes-relocate.ps1" -Root "%HERMES_CURRENT_ROOT%" -OldRoot "!HERMES_OLD_ROOT!"
+    )
+)
+
+if not exist "%UV%" (
+    echo Error: uv.exe not found at %UV%.
+    goto :finish
+)
+
+if not exist "%HERMES_AGENT_DIR%" (
+    echo Error: Hermes agent directory not found at %HERMES_AGENT_DIR%.
+    goto :finish
+)
+
+echo Finding portable Python...
+set "PY="
+for /f "delims=" %%p in ('dir /s /b "%PYROOT%\python.exe" 2^>nul') do (
+    set "PY=%%p"
+    goto :found_python
+)
+
+echo Portable Python not found. Installing Python $PythonVersion...
+"%UV%" python install $PythonVersion --install-dir "%PYROOT%" --no-bin
+for /f "delims=" %%p in ('dir /s /b "%PYROOT%\python.exe" 2^>nul') do (
+    set "PY=%%p"
+    goto :found_python
+)
+
+echo Error: Python was not found under %PYROOT%.
+goto :finish
+
+:found_python
+echo Python: %PY%
+
+echo Recreating venv...
+cd /d "%HERMES_AGENT_DIR%"
+if exist venv rmdir /s /q venv
+"%UV%" venv venv --python "%PY%"
+if errorlevel 1 goto :finish
+
+echo Installing dependencies...
+set "UV_PROJECT_ENVIRONMENT=%HERMES_AGENT_DIR%\venv"
+if exist uv.lock (
+    "%UV%" sync --extra all --locked
+) else (
+    "%UV%" pip install -e ".[all]"
+)
+if errorlevel 1 (
+    echo Dependency install failed. Trying editable fallback...
+    "%UV%" pip install -e ".[all]"
+    if errorlevel 1 goto :finish
+)
+
+echo %HERMES_CURRENT_ROOT%>"%HERMES_ROOT%install-root.txt"
+echo.
+echo Repair complete.
+
+:finish
+echo.
+if "%QUIET%"=="1" exit /b %ERRORLEVEL%
+echo Press any key to close this window...
+pause >nul
+"@
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($batPath, $content, $utf8NoBom)
+    Write-Success "Created repair-venv.bat"
+}
+
 function New-RelocateScript {
     $scriptPath = Join-Path $PortableRoot "hermes-relocate.ps1"
     $content = @'
@@ -2092,6 +2374,9 @@ function New-PortableLaunchers {
     New-StartBat
     New-StopBat
     New-UpdateBat
+    New-WebUiStartBat
+    New-WebUiStopBat
+    New-RepairVenvBat
     New-RelocateScript
 }
 
@@ -2117,6 +2402,12 @@ function Write-Completion {
     Write-Host "Stop Hermes"
     Write-Host "  hermes-update.bat    " -NoNewline -ForegroundColor Green
     Write-Host "Update Hermes"
+    Write-Host "  hermes-web-ui-start.bat" -NoNewline -ForegroundColor Green
+    Write-Host "Start Hermes Web UI"
+    Write-Host "  hermes-web-ui-stop.bat " -NoNewline -ForegroundColor Green
+    Write-Host "Stop Hermes Web UI"
+    Write-Host "  repair-venv.bat     " -NoNewline -ForegroundColor Green
+    Write-Host "Repair venv after moving the install directory"
     Write-Host ""
     Write-Host "* Data & Config:" -ForegroundColor Cyan
     Write-Host "  $HermesHome" -ForegroundColor Yellow
